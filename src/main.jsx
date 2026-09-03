@@ -34,6 +34,7 @@ const SCENE_STORAGE_KEY = "flowdraw.scene.v2";
 const FLOW_STORAGE_KEY = "flowdraw.flows.v2";
 const JUNCTION_STORAGE_KEY = "flowdraw.junctions.v1";
 const PANEL_STORAGE_KEY = "flowdraw.panel.v1";
+const PACKET_STORAGE_KEY = "flowdraw.packets.v1";
 
 const DEFAULT_SPEED = 120;
 
@@ -197,6 +198,44 @@ function loadPanelState() {
     };
   } catch {
     return fallback;
+  }
+}
+
+
+function loadSavedPackets() {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(PACKET_STORAGE_KEY) ?? "[]"
+    );
+
+    return Array.isArray(saved)
+      ? saved.filter((packet) =>
+          packet &&
+          typeof packet.id === "string" &&
+          typeof packet.arrowId === "string"
+        ).map((packet) => ({
+          id: packet.id,
+          arrowId: packet.arrowId,
+          label: typeof packet.label === "string"
+            ? packet.label
+            : "Packet",
+          type: typeof packet.type === "string"
+            ? packet.type
+            : "data",
+          status: ["queued", "moving", "delivered", "failed"]
+            .includes(packet.status)
+            ? packet.status
+            : "moving",
+          color: typeof packet.color === "string"
+            ? packet.color
+            : "#4c6ef5",
+          payload: typeof packet.payload === "string"
+            ? packet.payload
+            : JSON.stringify(packet.payload ?? {}, null, 2),
+        }))
+      : [];
+  } catch {
+    return [];
   }
 }
 
@@ -489,8 +528,11 @@ function applyJunctionBindings(
 function AnimatedArrow({
   element,
   flow,
+  packets,
   appState,
   containerRect,
+  selectedPacketId,
+  onPacketSelect,
 }) {
   const points =
     getViewportPoints(
@@ -654,18 +696,63 @@ function AnimatedArrow({
             }
           />
 
-          {[0, 1, 2].map((index) => (
-            <circle
-              key={index}
-              r={Math.max(4, strokeWidth * 1.45)}
-              fill={
-                element.strokeColor ||
-                "#1b1b1f"
+          {(packets.length
+            ? packets
+            : [0, 1, 2].map((index) => ({
+                id: `decorative-${index}`,
+                decorative: true,
+              }))
+          ).map((packet, index, packetList) => (
+            <g
+              key={packet.id}
+              className={
+                packet.decorative
+                  ? ""
+                  : "flow-packet"
               }
+              onPointerDown={packet.decorative
+                ? undefined
+                : (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onPacketSelect(packet.id);
+                  }}
             >
+              {packet.decorative ? (
+                <circle
+                  r={Math.max(4, strokeWidth * 1.45)}
+                  fill={element.strokeColor || "#1b1b1f"}
+                />
+              ) : (
+                <>
+                  <rect
+                    x={-Math.max(28, packet.label.length * 3.8 + 12)}
+                    y="-11"
+                    width={Math.max(56, packet.label.length * 7.6 + 24)}
+                    height="22"
+                    rx="11"
+                    fill={packet.color || "#4c6ef5"}
+                    stroke={
+                      selectedPacketId === packet.id
+                        ? "#ffd43b"
+                        : "#ffffff"
+                    }
+                    strokeWidth="2"
+                  />
+                  <text
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#ffffff"
+                    fontSize="11"
+                    fontFamily="Arial, sans-serif"
+                  >
+                    {packet.label || "Packet"}
+                  </text>
+                </>
+              )}
               <animateMotion
                 dur={`${lumpDuration}s`}
-                begin={`${-(index * lumpDuration) / 3}s`}
+                begin={`${-(index * lumpDuration) / packetList.length}s`}
                 repeatCount="indefinite"
                 keyPoints={
                   direction === 1
@@ -677,7 +764,7 @@ function AnimatedArrow({
               >
                 <mpath href={`#${pathId}`} />
               </animateMotion>
-            </circle>
+            </g>
           ))}
         </>
       ) : (
@@ -728,10 +815,13 @@ function FlowOverlay({
   elements,
   flows,
   junctions,
+  packets,
   appState,
   containerRect,
   selectedJunctionId,
   onJunctionPointerDown,
+  selectedPacketId,
+  onPacketSelect,
 }) {
 
   if (!appState) {
@@ -792,6 +882,10 @@ function FlowOverlay({
               flows[element.id]
             }
 
+            packets={packets.filter(
+              (packet) => packet.arrowId === element.id
+            )}
+
             appState={
               appState
             }
@@ -799,6 +893,10 @@ function FlowOverlay({
             containerRect={
               containerRect
             }
+
+            selectedPacketId={selectedPacketId}
+
+            onPacketSelect={onPacketSelect}
           />
         )
       )}
@@ -897,6 +995,12 @@ function App() {
       () => loadSavedJunctions()
     );
 
+  const [packets, setPackets] =
+    useState(loadSavedPackets);
+
+  const [selectedPacketId, setSelectedPacketId] =
+    useState(null);
+
 
   const [selectedJunctionId,
     setSelectedJunctionId] = useState(null);
@@ -926,6 +1030,14 @@ function App() {
       JSON.stringify(panelState)
     );
   }, [panelState]);
+
+
+  useEffect(() => {
+    localStorage.setItem(
+      PACKET_STORAGE_KEY,
+      JSON.stringify(packets)
+    );
+  }, [packets]);
 
 
   useEffect(() => {
@@ -1087,6 +1199,22 @@ function App() {
             junctionsRef.current
           )
         );
+
+        const activeArrowIds = new Set(
+          bound.elements
+            .filter((element) =>
+              !element.isDeleted && element.type === "arrow"
+            )
+            .map((element) => element.id)
+        );
+        setPackets((previous) => {
+          const next = previous.filter((packet) =>
+            activeArrowIds.has(packet.arrowId)
+          );
+          return next.length === previous.length
+            ? previous
+            : next;
+        });
 
         setElements(bound.elements);
 
@@ -1503,7 +1631,8 @@ function App() {
         !isPlacingJunction ||
         !appState ||
         event.target.closest?.(".flow-panel") ||
-        event.target.closest?.(".flow-junction")
+        event.target.closest?.(".flow-junction") ||
+        event.target.closest?.(".flow-packet")
       ) {
         return;
       }
@@ -1787,6 +1916,70 @@ function App() {
     }, [selectedJunctionId]);
 
 
+  const selectedPacket = packets.find(
+    (packet) => packet.id === selectedPacketId
+  ) ?? null;
+
+
+  const addPacket = useCallback(() => {
+    if (selectedArrowIds.length !== 1) {
+      return;
+    }
+
+    const packet = {
+      id: createJunctionId(),
+      arrowId: selectedArrowIds[0],
+      label: `Packet ${packets.length + 1}`,
+      type: "data",
+      status: "moving",
+      color: "#4c6ef5",
+      payload: "{}",
+    };
+
+    setPackets((previous) => [...previous, packet]);
+    setSelectedPacketId(packet.id);
+    setFlows((previous) => ({
+      ...previous,
+      [selectedArrowIds[0]]: {
+        ...previous[selectedArrowIds[0]],
+        enabled: true,
+        speed: previous[selectedArrowIds[0]]?.speed ?? DEFAULT_SPEED,
+        direction: previous[selectedArrowIds[0]]?.direction ?? 1,
+        pattern: "lumps",
+      },
+    }));
+  }, [packets.length, selectedArrowIds]);
+
+
+  const updateSelectedPacket = useCallback((updates) => {
+    if (!selectedPacketId) {
+      return;
+    }
+
+    setPackets((previous) =>
+      previous.map((packet) =>
+        packet.id === selectedPacketId
+          ? { ...packet, ...updates }
+          : packet
+      )
+    );
+  }, [selectedPacketId]);
+
+
+  const deleteSelectedPacket = useCallback(() => {
+    if (!selectedPacketId) {
+      return;
+    }
+
+    setPackets((previous) =>
+      previous.filter((packet) =>
+        packet.id !== selectedPacketId
+      )
+    );
+    setSelectedPacketId(null);
+  }, [selectedPacketId]);
+
+
   /* -----------------------------------------------------
      Clear everything
   ----------------------------------------------------- */
@@ -1805,10 +1998,14 @@ function App() {
       JUNCTION_STORAGE_KEY
     );
 
+    localStorage.removeItem(PACKET_STORAGE_KEY);
+
     clearTimeout(saveTimerRef.current);
     setElements([]);
     setFlows({});
     setJunctions([]);
+    setPackets([]);
+    setSelectedPacketId(null);
     setSelectedJunctionId(null);
     setAppState((previous) => previous
       ? { ...previous, selectedElementIds: {} }
@@ -1862,6 +2059,8 @@ function App() {
             junctions
           }
 
+          packets={packets}
+
           appState={
             appState
           }
@@ -1877,6 +2076,10 @@ function App() {
           onJunctionPointerDown={
             handleJunctionPointerDown
           }
+
+          selectedPacketId={selectedPacketId}
+
+          onPacketSelect={setSelectedPacketId}
         />
 
 
@@ -2028,6 +2231,112 @@ function App() {
               }
             }
           />
+
+
+          <div
+            className="divider"
+          />
+
+
+          <div className="flow-title">
+            Data packets
+          </div>
+
+
+          <button
+            disabled={selectedArrowIds.length !== 1}
+            onClick={addPacket}
+          >
+            Add packet to arrow
+          </button>
+
+
+          <select
+            aria-label="Selected data packet"
+            value={selectedPacketId ?? ""}
+            onChange={(event) =>
+              setSelectedPacketId(event.target.value || null)
+            }
+          >
+            <option value="">Select packet</option>
+            {packets.map((packet) => (
+              <option key={packet.id} value={packet.id}>
+                {packet.label || "Packet"}
+              </option>
+            ))}
+          </select>
+
+
+          {selectedPacket && (
+            <div className="packet-editor">
+              <label>
+                <span>Label</span>
+                <input
+                  value={selectedPacket.label}
+                  onChange={(event) =>
+                    updateSelectedPacket({ label: event.target.value })
+                  }
+                />
+              </label>
+
+              <label>
+                <span>Type</span>
+                <input
+                  value={selectedPacket.type}
+                  onChange={(event) =>
+                    updateSelectedPacket({ type: event.target.value })
+                  }
+                />
+              </label>
+
+              <label>
+                <span>Status</span>
+                <select
+                  value={selectedPacket.status}
+                  onChange={(event) =>
+                    updateSelectedPacket({ status: event.target.value })
+                  }
+                >
+                  <option value="queued">Queued</option>
+                  <option value="moving">Moving</option>
+                  <option value="delivered">Delivered</option>
+                  <option value="failed">Failed</option>
+                </select>
+              </label>
+
+              <label className="speed-row">
+                <span>Color</span>
+                <input
+                  type="color"
+                  value={selectedPacket.color}
+                  onChange={(event) =>
+                    updateSelectedPacket({ color: event.target.value })
+                  }
+                />
+              </label>
+
+              <label>
+                <span>Payload</span>
+                <textarea
+                  rows="5"
+                  spellCheck="false"
+                  value={selectedPacket.payload}
+                  placeholder={'{"key": "value"}'}
+                  onChange={(event) =>
+                    updateSelectedPacket({ payload: event.target.value })
+                  }
+                />
+              </label>
+
+              <div className="flow-status">
+                Arrow: {selectedPacket.arrowId.slice(0, 8)}…
+              </div>
+
+              <button onClick={deleteSelectedPacket}>
+                Delete packet
+              </button>
+            </div>
+          )}
 
 
           <div

@@ -62,6 +62,11 @@ body,
   cursor: grabbing;
 }
 
+.flow-packet {
+  pointer-events: all;
+  cursor: pointer;
+}
+
 
 .flow-panel {
   position: absolute;
@@ -183,6 +188,42 @@ body,
 
 .flow-panel select:disabled {
   opacity: 0.4;
+}
+
+.flow-panel input:not([type="range"]):not([type="checkbox"]):not([type="color"]),
+.flow-panel textarea {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 7px;
+  background: #ffffff;
+  color: #1b1b1f;
+  font: inherit;
+}
+
+.flow-panel textarea {
+  resize: vertical;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+}
+
+.packet-editor,
+.packet-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.packet-editor {
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid rgba(76, 110, 245, 0.25);
+  border-radius: 8px;
+  background: rgba(76, 110, 245, 0.05);
+}
+
+.packet-editor .speed-row {
+  flex-direction: row;
 }
 
 
