@@ -65,6 +65,79 @@ body,
 .flow-packet {
   pointer-events: all;
   cursor: pointer;
+  outline: none;
+}
+
+.flow-packet:hover rect,
+.flow-packet:focus rect {
+  filter: brightness(1.15);
+  stroke: #ffd43b;
+  stroke-width: 3px;
+}
+
+.packet-preview {
+  position: absolute;
+  z-index: 120;
+  width: 300px;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+  color: #1b1b1f;
+  font: 13px/1.4 Arial, sans-serif;
+}
+
+.packet-preview-header,
+.packet-preview-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.packet-preview-header button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: #f1f3f5;
+  cursor: pointer;
+}
+
+.packet-preview-meta {
+  justify-content: flex-start;
+  margin: 6px 0;
+  color: #666;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.packet-preview-meta span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f1f3f5;
+}
+
+.packet-preview pre {
+  max-height: 160px;
+  margin: 8px 0;
+  padding: 9px;
+  overflow: auto;
+  border-radius: 7px;
+  background: #f8f9fa;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.45 ui-monospace, Consolas, monospace;
+}
+
+.packet-preview > button {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 7px;
+  background: #ffffff;
+  cursor: pointer;
 }
 
 

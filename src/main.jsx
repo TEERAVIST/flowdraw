@@ -252,6 +252,15 @@ function getOverlayAppState(appState) {
 }
 
 
+function formatPacketPayload(payload) {
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2);
+  } catch {
+    return payload || "(empty payload)";
+  }
+}
+
+
 /* =========================================================
    GEOMETRY
 ========================================================= */
@@ -710,12 +719,38 @@ function AnimatedArrow({
                   ? ""
                   : "flow-packet"
               }
+              role={packet.decorative ? undefined : "button"}
+              tabIndex={packet.decorative ? undefined : 0}
+              aria-label={packet.decorative
+                ? undefined
+                : `Open payload for ${packet.label || "packet"}`}
               onPointerDown={packet.decorative
                 ? undefined
                 : (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    onPacketSelect(packet.id);
+                    onPacketSelect(packet.id, {
+                      clientX: event.clientX,
+                      clientY: event.clientY,
+                    });
+                  }}
+              onClick={packet.decorative
+                ? undefined
+                : (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onPacketSelect(packet.id, {
+                      clientX: event.clientX,
+                      clientY: event.clientY,
+                    });
+                  }}
+              onKeyDown={packet.decorative
+                ? undefined
+                : (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onPacketSelect(packet.id);
+                    }
                   }}
             >
               {packet.decorative ? (
@@ -999,6 +1034,9 @@ function App() {
     useState(loadSavedPackets);
 
   const [selectedPacketId, setSelectedPacketId] =
+    useState(null);
+
+  const [packetPreview, setPacketPreview] =
     useState(null);
 
 
@@ -1632,7 +1670,8 @@ function App() {
         !appState ||
         event.target.closest?.(".flow-panel") ||
         event.target.closest?.(".flow-junction") ||
-        event.target.closest?.(".flow-packet")
+        event.target.closest?.(".flow-packet") ||
+        event.target.closest?.(".packet-preview")
       ) {
         return;
       }
@@ -1921,6 +1960,20 @@ function App() {
   ) ?? null;
 
 
+  const selectPacketFromCanvas = useCallback((packetId, pointer) => {
+    setSelectedPacketId(packetId);
+    setPacketPreview({
+      packetId,
+      x: pointer
+        ? pointer.clientX - containerRect.left
+        : containerRect.width / 2,
+      y: pointer
+        ? pointer.clientY - containerRect.top
+        : containerRect.height / 2,
+    });
+  }, [containerRect]);
+
+
   const addPacket = useCallback(() => {
     if (selectedArrowIds.length !== 1) {
       return;
@@ -1977,6 +2030,7 @@ function App() {
       )
     );
     setSelectedPacketId(null);
+    setPacketPreview(null);
   }, [selectedPacketId]);
 
 
@@ -2006,6 +2060,7 @@ function App() {
     setJunctions([]);
     setPackets([]);
     setSelectedPacketId(null);
+    setPacketPreview(null);
     setSelectedJunctionId(null);
     setAppState((previous) => previous
       ? { ...previous, selectedElementIds: {} }
@@ -2079,8 +2134,68 @@ function App() {
 
           selectedPacketId={selectedPacketId}
 
-          onPacketSelect={setSelectedPacketId}
+          onPacketSelect={selectPacketFromCanvas}
         />
+
+
+        {packetPreview && (() => {
+          const packet = packets.find(
+            ({ id }) => id === packetPreview.packetId
+          );
+
+          if (!packet) {
+            return null;
+          }
+
+          return (
+            <aside
+              className="packet-preview"
+              style={{
+                left: Math.min(
+                  Math.max(12, packetPreview.x + 14),
+                  Math.max(12, containerRect.width - 312)
+                ),
+                top: Math.min(
+                  Math.max(12, packetPreview.y + 14),
+                  Math.max(12, containerRect.height - 250)
+                ),
+              }}
+              aria-label={`Payload preview for ${packet.label}`}
+            >
+              <div className="packet-preview-header">
+                <strong>{packet.label || "Packet"}</strong>
+                <button
+                  type="button"
+                  aria-label="Close payload preview"
+                  onClick={() => setPacketPreview(null)}
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="packet-preview-meta">
+                <span>{packet.type || "data"}</span>
+                <span>{packet.status || "moving"}</span>
+              </div>
+
+              <pre>{formatPacketPayload(packet.payload)}</pre>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPacketId(packet.id);
+                  setPanelState((previous) => ({
+                    ...previous,
+                    collapsed: false,
+                  }));
+                  setPacketPreview(null);
+                }}
+              >
+                Edit packet
+              </button>
+            </aside>
+          );
+        })()}
 
 
         <div
