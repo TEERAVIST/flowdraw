@@ -1018,6 +1018,9 @@ function App() {
   const panelRef =
     useRef(null);
 
+  const projectFileInputRef =
+    useRef(null);
+
   const saveTimerRef =
     useRef(null);
 
@@ -2100,6 +2103,105 @@ function App() {
   }, [selectedPacketId]);
 
 
+  const saveFlowdrawProject = useCallback(() => {
+    const project = {
+      type: "flowdraw-project",
+      version: 1,
+      savedAt: new Date().toISOString(),
+      scene: {
+        elements: excalidrawApiRef.current?.getSceneElementsIncludingDeleted?.()
+          ?? elements,
+        appState: {
+          viewBackgroundColor: "#ffffff",
+        },
+      },
+      flows,
+      junctions,
+      packets,
+    };
+
+    const blob = new Blob(
+      [JSON.stringify(project, null, 2)],
+      { type: "application/json" }
+    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `flowdraw-${new Date()
+      .toISOString()
+      .slice(0, 10)}.flowdraw.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [elements, flows, junctions, packets]);
+
+
+  const loadFlowdrawProject = useCallback(async (file) => {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const project = JSON.parse(await file.text());
+
+      if (
+        project?.type !== "flowdraw-project" ||
+        project.version !== 1 ||
+        !Array.isArray(project.scene?.elements) ||
+        !project.flows ||
+        typeof project.flows !== "object" ||
+        !Array.isArray(project.junctions) ||
+        !Array.isArray(project.packets)
+      ) {
+        throw new Error("This is not a valid Flowdraw project file.");
+      }
+
+      const restoredJunctions = project.junctions.filter(
+        (junction) =>
+          junction &&
+          typeof junction.id === "string" &&
+          Number.isFinite(junction.x) &&
+          Number.isFinite(junction.y)
+      );
+      const restoredPackets = project.packets.filter(
+        (packet) =>
+          packet &&
+          typeof packet.id === "string" &&
+          typeof packet.arrowId === "string"
+      );
+      const restoredFlows = cleanFlowMetadata(
+        project.flows,
+        project.scene.elements,
+        restoredJunctions
+      );
+
+      setElements(project.scene.elements);
+      setFlows(restoredFlows);
+      setJunctions(restoredJunctions);
+      setPackets(restoredPackets);
+      setSelectedPacketId(null);
+      setPacketPreview(null);
+      setSelectedJunctionId(null);
+      setGlobalPaused(false);
+
+      excalidrawApiRef.current?.updateScene({
+        elements: project.scene.elements,
+        appState: {
+          viewBackgroundColor:
+            project.scene.appState?.viewBackgroundColor ?? "#ffffff",
+          selectedElementIds: {},
+        },
+      });
+    } catch (error) {
+      console.error("Failed to load Flowdraw project:", error);
+      alert(error.message || "Could not load this Flowdraw project.");
+    } finally {
+      if (projectFileInputRef.current) {
+        projectFileInputRef.current.value = "";
+      }
+    }
+  }, []);
+
+
   /* -----------------------------------------------------
      Clear everything
   ----------------------------------------------------- */
@@ -2719,6 +2821,34 @@ function App() {
 
           <div
             className="divider"
+          />
+
+
+          <div className="flow-title">
+            Project file
+          </div>
+
+
+          <button onClick={saveFlowdrawProject}>
+            Save Flowdraw project
+          </button>
+
+
+          <button
+            onClick={() => projectFileInputRef.current?.click()}
+          >
+            Load Flowdraw project
+          </button>
+
+
+          <input
+            ref={projectFileInputRef}
+            className="flow-file-input"
+            type="file"
+            accept=".flowdraw.json,application/json"
+            onChange={(event) =>
+              loadFlowdrawProject(event.target.files?.[0])
+            }
           />
 
 

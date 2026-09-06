@@ -263,6 +263,10 @@ body,
   opacity: 0.4;
 }
 
+.flow-file-input {
+  display: none;
+}
+
 .flow-panel input:not([type="range"]):not([type="checkbox"]):not([type="color"]),
 .flow-panel textarea {
   width: 100%;
