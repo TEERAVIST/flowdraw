@@ -538,11 +538,27 @@ function AnimatedArrow({
   element,
   flow,
   packets,
+  paused,
   appState,
   containerRect,
   selectedPacketId,
   onPacketSelect,
 }) {
+  const animationSvgRef = useRef(null);
+
+  useEffect(() => {
+    const animationSvg = animationSvgRef.current;
+    if (!animationSvg) {
+      return;
+    }
+
+    if (paused) {
+      animationSvg.pauseAnimations();
+    } else {
+      animationSvg.unpauseAnimations();
+    }
+  }, [paused]);
+
   const points =
     getViewportPoints(
       element,
@@ -645,7 +661,15 @@ function AnimatedArrow({
     .replace(/[^a-zA-Z0-9_-]/g, "");
 
   return (
-    <g>
+    <svg
+      ref={animationSvgRef}
+      className="flow-animation-clock"
+      x="0"
+      y="0"
+      width="100%"
+      height="100%"
+      overflow="visible"
+    >
 
       <defs>
   <marker
@@ -837,7 +861,7 @@ function AnimatedArrow({
         </path>
       )}
 
-    </g>
+    </svg>
   );
 }
 
@@ -851,6 +875,7 @@ function FlowOverlay({
   flows,
   junctions,
   packets,
+  globalPaused,
   appState,
   containerRect,
   selectedJunctionId,
@@ -920,6 +945,10 @@ function FlowOverlay({
             packets={packets.filter(
               (packet) => packet.arrowId === element.id
             )}
+
+            paused={
+              globalPaused || flows[element.id]?.paused === true
+            }
 
             appState={
               appState
@@ -1038,6 +1067,9 @@ function App() {
 
   const [packetPreview, setPacketPreview] =
     useState(null);
+
+  const [globalPaused, setGlobalPaused] =
+    useState(false);
 
 
   const [selectedJunctionId,
@@ -1375,6 +1407,12 @@ function App() {
         flows[id]?.enabled
     );
 
+  const allSelectedArePaused =
+    hasSelectedArrow &&
+    selectedArrowIds.every(
+      (id) => flows[id]?.paused === true
+    );
+
 
   const selectedFlow =
     selectedArrowIds.length
@@ -1555,6 +1593,34 @@ function App() {
       },
       [selectedArrowIds]
     );
+
+
+  const toggleSelectedPause =
+    useCallback(() => {
+      if (!selectedArrowIds.length) {
+        return;
+      }
+
+      setFlows((previous) => {
+        const shouldPause = !selectedArrowIds.every(
+          (id) => previous[id]?.paused === true
+        );
+        const next = { ...previous };
+
+        for (const id of selectedArrowIds) {
+          next[id] = {
+            ...previous[id],
+            enabled: previous[id]?.enabled ?? true,
+            speed: previous[id]?.speed ?? DEFAULT_SPEED,
+            direction: previous[id]?.direction ?? 1,
+            pattern: previous[id]?.pattern ?? "dashes",
+            paused: shouldPause,
+          };
+        }
+
+        return next;
+      });
+    }, [selectedArrowIds]);
 
 
   /* -----------------------------------------------------
@@ -2062,6 +2128,7 @@ function App() {
     setSelectedPacketId(null);
     setPacketPreview(null);
     setSelectedJunctionId(null);
+    setGlobalPaused(false);
     setAppState((previous) => previous
       ? { ...previous, selectedElementIds: {} }
       : previous
@@ -2115,6 +2182,8 @@ function App() {
           }
 
           packets={packets}
+
+          globalPaused={globalPaused}
 
           appState={
             appState
@@ -2300,6 +2369,32 @@ function App() {
           >
             Reverse direction
           </button>
+
+
+          <div className="flow-pause-row">
+            <button
+              disabled={!hasSelectedArrow}
+              className={
+                allSelectedArePaused
+                  ? "flow-active"
+                  : ""
+              }
+              onClick={toggleSelectedPause}
+            >
+              {allSelectedArePaused
+                ? "Resume selected"
+                : "Pause selected"}
+            </button>
+
+            <button
+              className={globalPaused ? "flow-active" : ""}
+              onClick={() =>
+                setGlobalPaused((paused) => !paused)
+              }
+            >
+              {globalPaused ? "Resume all" : "Pause all"}
+            </button>
+          </div>
 
 
           <div

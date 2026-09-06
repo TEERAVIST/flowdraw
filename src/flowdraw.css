@@ -308,6 +308,12 @@ body,
     #eeeeee !important;
 }
 
+.flow-pause-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
 
 .speed-row {
   display: flex;
