@@ -24,6 +24,7 @@ import {
   inferJunctionTopology,
 } from "./lib/topology.js";
 import { FlowPatternSelect } from "./components/FlowPatternSelect.jsx";
+import { exportAnimation } from "./lib/animationExport.js";
 
 
 /* =========================================================
@@ -1073,6 +1074,17 @@ function App() {
 
   const [globalPaused, setGlobalPaused] =
     useState(false);
+
+  const [exportFormat, setExportFormat] =
+    useState("gif");
+  const [exportDuration, setExportDuration] =
+    useState(3);
+  const [isExportingAnimation, setIsExportingAnimation] =
+    useState(false);
+  const [isSelectingExportRegion, setIsSelectingExportRegion] =
+    useState(false);
+  const [exportRegion, setExportRegion] =
+    useState(null);
 
 
   const [selectedJunctionId,
@@ -2202,6 +2214,87 @@ function App() {
   }, []);
 
 
+  const handleAnimationExport = useCallback(async () => {
+    if (!wrapperRef.current || isExportingAnimation) {
+      return;
+    }
+
+    try {
+      await exportAnimation({
+        target: wrapperRef.current,
+        format: exportFormat,
+        duration: exportDuration,
+        fps: exportFormat === "gif" ? 12 : 24,
+        region: exportRegion,
+        onCaptureChange: setIsExportingAnimation,
+      });
+    } catch (error) {
+      if (error.name !== "NotAllowedError") {
+        console.error("Animation export failed:", error);
+        alert(error.message || "Could not export this animation.");
+      }
+      setIsExportingAnimation(false);
+    }
+  }, [
+    exportDuration,
+    exportFormat,
+    exportRegion,
+    isExportingAnimation,
+  ]);
+
+
+  const handleExportRegionPointerDown =
+    useCallback((event) => {
+      if (event.button !== 0 || !wrapperRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      const rect = wrapperRef.current.getBoundingClientRect();
+      const clampX = (clientX) => Math.min(
+        rect.width,
+        Math.max(0, clientX - rect.left)
+      );
+      const clampY = (clientY) => Math.min(
+        rect.height,
+        Math.max(0, clientY - rect.top)
+      );
+      const startX = clampX(event.clientX);
+      const startY = clampY(event.clientY);
+
+      const updateRegion = (clientX, clientY) => {
+        const currentX = clampX(clientX);
+        const currentY = clampY(clientY);
+        setExportRegion({
+          x: Math.min(startX, currentX),
+          y: Math.min(startY, currentY),
+          width: Math.abs(currentX - startX),
+          height: Math.abs(currentY - startY),
+        });
+      };
+
+      updateRegion(event.clientX, event.clientY);
+
+      const handleMove = (moveEvent) => {
+        updateRegion(moveEvent.clientX, moveEvent.clientY);
+      };
+      const handleUp = (upEvent) => {
+        updateRegion(upEvent.clientX, upEvent.clientY);
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+        setIsSelectingExportRegion(false);
+        setExportRegion((region) =>
+          region && region.width >= 20 && region.height >= 20
+            ? region
+            : null
+        );
+      };
+
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+    }, []);
+
+
   /* -----------------------------------------------------
      Clear everything
   ----------------------------------------------------- */
@@ -2250,7 +2343,11 @@ function App() {
       <div
         ref={wrapperRef}
 
-        className="flowdraw-app"
+        className={
+          `flowdraw-app${isExportingAnimation
+            ? " flowdraw-app--exporting"
+            : ""}`
+        }
 
         onPointerDownCapture={
           handleCanvasPointerDown
@@ -2268,6 +2365,36 @@ function App() {
             handleChange
           }
         />
+
+
+        {isSelectingExportRegion && (
+          <div
+            className="export-region-selector"
+            onPointerDown={handleExportRegionPointerDown}
+          >
+            <div className="export-region-hint">
+              Drag to select the recording area
+            </div>
+          </div>
+        )}
+
+
+        {exportRegion && (
+          <div
+            className="export-region-frame"
+            style={{
+              left: exportRegion.x,
+              top: exportRegion.y,
+              width: exportRegion.width,
+              height: exportRegion.height,
+            }}
+          >
+            <span>
+              {Math.round(exportRegion.width)} ×{" "}
+              {Math.round(exportRegion.height)}
+            </span>
+          </div>
+        )}
 
 
         <FlowOverlay
@@ -2822,6 +2949,88 @@ function App() {
           <div
             className="divider"
           />
+
+
+          <div className="flow-title">
+            Animated export
+          </div>
+
+
+          <select
+            aria-label="Animation export format"
+            value={exportFormat}
+            disabled={isExportingAnimation}
+            onChange={(event) => setExportFormat(event.target.value)}
+          >
+            <option value="gif">Animated GIF</option>
+            <option value="webm">WebM video</option>
+          </select>
+
+
+          <label className="speed-row">
+            <span>Duration</span>
+            <select
+              value={exportDuration}
+              disabled={isExportingAnimation}
+              onChange={(event) =>
+                setExportDuration(Number(event.target.value))
+              }
+            >
+              <option value="3">3 seconds</option>
+              <option value="5">5 seconds</option>
+              <option value="10">10 seconds</option>
+            </select>
+          </label>
+
+
+          <div className="flow-pause-row">
+            <button
+              disabled={isExportingAnimation}
+              className={
+                isSelectingExportRegion
+                  ? "flow-active"
+                  : ""
+              }
+              onClick={() => {
+                setExportRegion(null);
+                setIsSelectingExportRegion(true);
+              }}
+            >
+              Select area
+            </button>
+
+            <button
+              disabled={!exportRegion || isExportingAnimation}
+              onClick={() => setExportRegion(null)}
+            >
+              Use full canvas
+            </button>
+          </div>
+
+
+          <div className="flow-status">
+            {exportRegion
+              ? `Area: ${Math.round(exportRegion.width)} × ${Math.round(exportRegion.height)}`
+              : "Area: full canvas"}
+          </div>
+
+
+          <button
+            disabled={isExportingAnimation}
+            onClick={handleAnimationExport}
+          >
+            {isExportingAnimation
+              ? "Recording animation…"
+              : `Export ${exportFormat.toUpperCase()}`}
+          </button>
+
+
+          <div className="flow-status">
+            When prompted, share this browser tab.
+          </div>
+
+
+          <div className="divider" />
 
 
           <div className="flow-title">

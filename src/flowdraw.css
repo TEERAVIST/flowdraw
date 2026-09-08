@@ -267,6 +267,57 @@ body,
   display: none;
 }
 
+.flowdraw-app--exporting .flow-panel,
+.flowdraw-app--exporting .packet-preview,
+.flowdraw-app--exporting .layer-ui__wrapper,
+.flowdraw-app--exporting .export-region-frame {
+  visibility: hidden !important;
+}
+
+.export-region-selector {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  cursor: crosshair;
+  background: rgba(76, 110, 245, 0.08);
+  touch-action: none;
+}
+
+.export-region-hint {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(27, 27, 31, 0.9);
+  color: #ffffff;
+  font: 13px Arial, sans-serif;
+  pointer-events: none;
+}
+
+.export-region-frame {
+  position: absolute;
+  z-index: 90;
+  border: 2px solid #4c6ef5;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.9) inset,
+    0 0 0 9999px rgba(20, 25, 40, 0.12);
+  pointer-events: none;
+}
+
+.export-region-frame span {
+  position: absolute;
+  top: -27px;
+  left: -2px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #4c6ef5;
+  color: #ffffff;
+  font: 11px Arial, sans-serif;
+  white-space: nowrap;
+}
+
 .flow-panel input:not([type="range"]):not([type="checkbox"]):not([type="color"]),
 .flow-panel textarea {
   width: 100%;
