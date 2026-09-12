@@ -9,13 +9,17 @@
     "build": "vite build",
     "lint": "eslint .",
     "test": "node --test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/index.js"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
     "gifenc": "^1.0.3",
+    "minio": "^8.0.6",
+    "pg": "^8.16.3",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

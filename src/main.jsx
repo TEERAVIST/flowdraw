@@ -2,6 +2,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,14 @@ import {
 } from "./lib/topology.js";
 import { FlowPatternSelect } from "./components/FlowPatternSelect.jsx";
 import { exportAnimation } from "./lib/animationExport.js";
+import {
+  connectToRoom,
+  createCollaborationRoom,
+  downloadRoomObject,
+  readRoomCredentials,
+  uploadRoomObject,
+  writeRoomCredentials,
+} from "./lib/collaboration.js";
 
 
 /* =========================================================
@@ -547,19 +556,6 @@ function AnimatedArrow({
 }) {
   const animationSvgRef = useRef(null);
 
-  useEffect(() => {
-    const animationSvg = animationSvgRef.current;
-    if (!animationSvg) {
-      return;
-    }
-
-    if (paused) {
-      animationSvg.pauseAnimations();
-    } else {
-      animationSvg.unpauseAnimations();
-    }
-  }, [paused]);
-
   const points =
     getViewportPoints(
       element,
@@ -568,6 +564,26 @@ function AnimatedArrow({
     );
 
   const d = pointsToPath(points);
+
+  useLayoutEffect(() => {
+    const animationSvg = animationSvgRef.current;
+    if (!animationSvg) {
+      return;
+    }
+
+    if (paused) {
+      if (!animationSvg.animationsPaused()) {
+        animationSvg.pauseAnimations();
+      }
+
+      // A paused SMIL animation can retain its old viewport transform when
+      // its motion path changes. Re-sampling the same timeline position keeps
+      // the packet attached to the arrow while the canvas pans or zooms.
+      animationSvg.setCurrentTime(animationSvg.getCurrentTime());
+    } else if (animationSvg.animationsPaused()) {
+      animationSvg.unpauseAnimations();
+    }
+  }, [d, paused]);
 
   if (!d) {
     return null;
@@ -1025,6 +1041,12 @@ function App() {
   const saveTimerRef =
     useRef(null);
 
+  const collaborationTimerRef = useRef(null);
+  const collaborationRef = useRef(null);
+  const applyingRemoteSnapshotRef = useRef(false);
+  const sceneFilesRef = useRef({});
+  const uploadingFileIdsRef = useRef(new Set());
+
   const excalidrawApiRef =
     useRef(null);
 
@@ -1065,6 +1087,12 @@ function App() {
 
   const [packets, setPackets] =
     useState(loadSavedPackets);
+
+  const [roomCredentials, setRoomCredentials] =
+    useState(readRoomCredentials);
+  const [collaborationStatus, setCollaborationStatus] =
+    useState(roomCredentials ? "connecting" : "local");
+  const [storedFiles, setStoredFiles] = useState({});
 
   const [selectedPacketId, setSelectedPacketId] =
     useState(null);
@@ -1107,6 +1135,98 @@ function App() {
   useEffect(() => {
     junctionsRef.current = junctions;
   }, [junctions]);
+
+  useEffect(() => {
+    if (!roomCredentials) return undefined;
+
+    const connection = connectToRoom(roomCredentials, {
+      onStatus: setCollaborationStatus,
+      onSnapshot: async (snapshot) => {
+        if (!snapshot || !Array.isArray(snapshot.elements)) return;
+        applyingRemoteSnapshotRef.current = true;
+        const nextFlows = snapshot.flows && typeof snapshot.flows === "object"
+          ? snapshot.flows
+          : {};
+        const nextJunctions = Array.isArray(snapshot.junctions)
+          ? snapshot.junctions
+          : [];
+        const nextPackets = Array.isArray(snapshot.packets)
+          ? snapshot.packets
+          : [];
+        setElements(snapshot.elements);
+        setFlows(nextFlows);
+        setJunctions(nextJunctions);
+        setPackets(nextPackets);
+        const references = Array.isArray(snapshot.files) ? snapshot.files : [];
+        setStoredFiles(Object.fromEntries(
+          references.map((reference) => [reference.fileId, reference])
+        ));
+        excalidrawApiRef.current?.updateScene({ elements: snapshot.elements });
+        const missingFiles = references.filter(
+          (reference) => !sceneFilesRef.current[reference.fileId]
+        );
+        if (missingFiles.length) {
+          try {
+            const downloaded = await Promise.all(
+              missingFiles.map((reference) =>
+                downloadRoomObject(roomCredentials, reference)
+              )
+            );
+            for (const file of downloaded) sceneFilesRef.current[file.id] = file;
+            excalidrawApiRef.current?.addFiles(downloaded);
+          } catch (error) {
+            console.error("Could not load shared assets:", error);
+          }
+        }
+      },
+    });
+    collaborationRef.current = connection;
+    return () => {
+      connection.close();
+      collaborationRef.current = null;
+    };
+  }, [roomCredentials]);
+
+  useEffect(() => {
+    if (!roomCredentials) return undefined;
+    if (applyingRemoteSnapshotRef.current) {
+      applyingRemoteSnapshotRef.current = false;
+      return undefined;
+    }
+    clearTimeout(collaborationTimerRef.current);
+    collaborationTimerRef.current = setTimeout(() => {
+      collaborationRef.current?.send({
+        elements,
+        flows,
+        junctions,
+        packets,
+        files: Object.values(storedFiles),
+      });
+    }, 300);
+    return () => clearTimeout(collaborationTimerRef.current);
+  }, [
+    collaborationStatus,
+    elements,
+    flows,
+    junctions,
+    packets,
+    roomCredentials,
+    storedFiles,
+  ]);
+
+  const startCollaboration = useCallback(async () => {
+    try {
+      setCollaborationStatus("connecting");
+      const credentials = await createCollaborationRoom();
+      writeRoomCredentials(credentials);
+      setRoomCredentials(credentials);
+      await navigator.clipboard?.writeText(window.location.href);
+    } catch (error) {
+      console.error(error);
+      setCollaborationStatus("local");
+      alert(error.message || "Could not create collaboration room.");
+    }
+  }, []);
 
 
   useEffect(() => {
@@ -1263,8 +1383,30 @@ function App() {
     useCallback(
       (
         nextElements,
-        nextAppState
+        nextAppState,
+        nextFiles = {}
       ) => {
+
+        sceneFilesRef.current = nextFiles;
+        if (roomCredentials) {
+          for (const file of Object.values(nextFiles)) {
+            if (
+              storedFiles[file.id] ||
+              uploadingFileIdsRef.current.has(file.id) ||
+              !file.dataURL
+            ) continue;
+            uploadingFileIdsRef.current.add(file.id);
+            uploadRoomObject(roomCredentials, file)
+              .then((reference) => {
+                setStoredFiles((previous) => ({
+                  ...previous,
+                  [reference.fileId]: reference,
+                }));
+              })
+              .catch((error) => console.error("Asset upload failed:", error))
+              .finally(() => uploadingFileIdsRef.current.delete(file.id));
+          }
+        }
 
         const array =
           Array.from(
@@ -1367,7 +1509,7 @@ function App() {
           });
         }
       },
-      []
+      [roomCredentials, storedFiles]
     );
 
 
@@ -2353,6 +2495,21 @@ function App() {
           handleCanvasPointerDown
         }
       >
+
+        <div className={`collaboration-status collaboration-status--${collaborationStatus}`}>
+          <span>{roomCredentials ? `Live: ${collaborationStatus}` : "Local only"}</span>
+          {!roomCredentials && (
+            <button type="button" onClick={startCollaboration}>Start live room</button>
+          )}
+          {roomCredentials && (
+            <button
+              type="button"
+              onClick={() => navigator.clipboard?.writeText(window.location.href)}
+            >
+              Copy invite link
+            </button>
+          )}
+        </div>
 
         <Excalidraw
           excalidrawAPI={setExcalidrawApi}

@@ -81,6 +81,15 @@ jobs:
             type=raw,value=sha-${{ github.sha }}
             type=raw,value=latest
 
+      - name: Extract server image metadata
+        id: server-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}-server
+          tags: |
+            type=raw,value=sha-${{ github.sha }}
+            type=raw,value=latest
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -91,6 +100,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.server
+          push: true
+          tags: ${{ steps.server-meta.outputs.tags }}
+          labels: ${{ steps.server-meta.outputs.labels }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
 
   deploy:
     needs: image
@@ -118,12 +138,14 @@ jobs:
         run: |
           owner="$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')"
           ssh -p "${VPS_PORT:-22}" "$VPS_USER@$VPS_HOST" \
-            "cd /opt/apps/flowdraw && umask 077 && printf 'GHCR_OWNER=%s\\nIMAGE_TAG=%s\\n' '$owner' '$IMAGE_TAG' > .env && docker compose -f compose.yml pull flowdraw && docker compose -f compose.yml up -d --no-build flowdraw"
+            "cd /opt/apps/flowdraw && umask 077 && touch .env && sed -i '/^GHCR_OWNER=/d;/^IMAGE_TAG=/d' .env && printf 'GHCR_OWNER=%s\\nIMAGE_TAG=%s\\n' '$owner' '$IMAGE_TAG' >> .env && docker compose -f compose.yml pull flowdraw flowdraw-api && docker compose -f compose.yml up -d --no-build"
 
       - name: Verify container health
         env:
+          APP_URL: ${{ secrets.APP_URL }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
-          ssh -p "${VPS_PORT:-22}" "$VPS_USER@$VPS_HOST" 'cd /opt/apps/flowdraw && container_id=$(docker compose -f compose.yml ps -q flowdraw) && test -n "$container_id" && for attempt in $(seq 1 12); do status=$(docker inspect --format="{{.State.Health.Status}}" "$container_id"); if [ "$status" = healthy ]; then exit 0; fi; if [ "$status" = unhealthy ]; then docker logs --tail 100 "$container_id"; exit 1; fi; sleep 5; done; docker logs --tail 100 "$container_id"; exit 1'
+          ssh -p "${VPS_PORT:-22}" "$VPS_USER@$VPS_HOST" 'cd /opt/apps/flowdraw && for service in flowdraw flowdraw-api; do container_id=$(docker compose -f compose.yml ps -q "$service"); test -n "$container_id" || exit 1; healthy=false; for attempt in $(seq 1 12); do status=$(docker inspect --format="{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" "$container_id"); if [ "$status" = healthy ]; then healthy=true; break; fi; if [ "$status" = unhealthy ] || [ "$status" = exited ]; then break; fi; sleep 5; done; if [ "$healthy" != true ]; then docker logs --tail 100 "$container_id"; exit 1; fi; done'
+          curl --fail --silent --show-error "$APP_URL/api/health"

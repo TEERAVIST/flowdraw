@@ -13,7 +13,94 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  flowdraw-api:
+    image: ghcr.io/${GHCR_OWNER}/flowdraw-server:${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      PGHOST: postgres
+      PGDATABASE: flowdraw
+      PGUSER: flowdraw
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      S3_ENDPOINT: minio
+      S3_PORT: "9000"
+      S3_USE_SSL: "false"
+      S3_BUCKET: flowdraw
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    expose:
+      - "3000"
+    networks:
+      - proxy
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flowdraw
+      POSTGRES_USER: flowdraw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowdraw -d flowdraw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
 networks:
   proxy:
     external: true
     name: proxy
+  backend:
+    internal: true
+
+volumes:
+  postgres_data:
+  minio_data:

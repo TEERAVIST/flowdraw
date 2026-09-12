@@ -68,6 +68,37 @@ body,
   outline: none;
 }
 
+.collaboration-status {
+  position: absolute;
+  z-index: 20;
+  top: 12px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid #d6d6dc;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  color: #495057;
+  font: 12px/1.2 Arial, sans-serif;
+  transform: translateX(-50%);
+}
+
+.collaboration-status--connected span { color: #2b8a3e; }
+.collaboration-status--offline span { color: #c92a2a; }
+
+.collaboration-status button {
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #4c6ef5;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+}
+
 .flow-packet:hover rect,
 .flow-packet:focus rect {
   filter: brightness(1.15);

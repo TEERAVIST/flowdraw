@@ -2,7 +2,7 @@
 
 ## Architecture
 
-GitHub Actions runs pnpm checks, builds the Docker image, pushes immutable `sha-<commit>` tags to GHCR, and deploys that exact image over SSH. The VPS only pulls and runs images. A separately managed Caddy gateway owns ports 80/443 and reaches Flowdraw through the external `proxy` Docker network.
+GitHub Actions runs pnpm checks, builds the frontend and API images, pushes immutable `sha-<commit>` tags to GHCR, and deploys those exact images over SSH. The VPS only pulls and runs images. A separately managed Caddy gateway owns ports 80/443. The API provides WebSocket room synchronization, PostgreSQL stores room snapshots, and MinIO stores shared binary objects.
 
 ```text
 /opt/apps/
@@ -16,7 +16,7 @@ GitHub Actions runs pnpm checks, builds the Docker image, pushes immutable `sha-
 └── app2/       # future
 ```
 
-No application publishes a host port. PostgreSQL and Redis are intentionally not included.
+No application, database, or object store publishes a host port. Only Caddy is internet-facing. PostgreSQL and MinIO communicate with the API on an internal Docker network.
 
 ## A. One-time VPS setup
 
@@ -80,9 +80,12 @@ Create `/opt/apps/flowdraw/.env` on the VPS:
 ```dotenv
 GHCR_OWNER=your-github-username-in-lowercase
 IMAGE_TAG=sha-full-git-commit
+POSTGRES_PASSWORD=long-independent-random-value
+MINIO_ROOT_USER=random-access-key
+MINIO_ROOT_PASSWORD=long-independent-random-value
 ```
 
-GitHub Actions rewrites these two non-secret values for each deployment, so production does not depend on `latest` and later Compose commands resolve the deployed image consistently. Never commit the real `.env`.
+Generate independent values with `openssl rand -base64 32`. GitHub Actions rewrites only `GHCR_OWNER` and `IMAGE_TAG`; it preserves the three server secrets. Production does not depend on `latest`. Never commit the real `.env`, and set `chmod 600 /opt/apps/flowdraw/.env`.
 
 ## G. Configure Caddy
 
@@ -90,7 +93,15 @@ Edit `/opt/apps/gateway/Caddyfile`:
 
 ```caddyfile
 flowdraw.example.com {
-    reverse_proxy flowdraw:80
+    handle /api/* {
+        reverse_proxy flowdraw-api:3000
+    }
+    handle /ws {
+        reverse_proxy flowdraw-api:3000
+    }
+    handle {
+        reverse_proxy flowdraw:80
+    }
 }
 ```
 
@@ -117,6 +128,7 @@ Under **Repository Settings → Secrets and variables → Actions**, create:
 - `VPS_SSH_KEY`: private deployment key including BEGIN/END lines.
 - `VPS_PORT`: normally `22`.
 - `VPS_KNOWN_HOSTS`: verified SSH host-key line.
+- `APP_URL`: public origin without a trailing slash, such as `https://flowdraw.example.com`.
 
 Generate the known-hosts value from a trusted workstation, then verify its fingerprint against the VPS console:
 
@@ -142,7 +154,7 @@ Never put this token in Compose, `.env`, the image, or Git. GitHub Actions pushe
 
 ## K. First deployment
 
-Push to `main`. The workflow installs from the frozen pnpm lockfile, runs lint/test/build, builds and pushes `sha-COMMIT`, deploys it with `--no-build`, and waits for a healthy container.
+Push to `main`. The workflow installs from the frozen pnpm lockfile, runs lint/test/build, builds and pushes both `flowdraw:sha-COMMIT` and `flowdraw-server:sha-COMMIT`, deploys with `--no-build`, and verifies the frontend and API.
 
 For a manual first start after setting `.env`:
 
@@ -153,7 +165,15 @@ docker compose up -d --no-build
 docker compose ps
 ```
 
-The VPS must not run `git pull`, `pnpm install`, `pnpm build`, `docker build`, or `docker compose build` during deployment.
+On its first start, the API creates the required database tables and the private MinIO bucket. The VPS must not run `git pull`, `pnpm install`, `pnpm build`, `docker build`, or `docker compose build` during deployment.
+
+## Live collaboration and storage
+
+Select **Start live room** in Flowdraw and share the copied invite URL. The URL contains both the room ID and a 256-bit edit key. Everyone using that link can edit, so treat it like a password and do not post it publicly. The edit key is stored in PostgreSQL only as a SHA-256 hash.
+
+Scene elements, flows, junctions, packets, and object references are synchronized through `/ws`. Snapshots use monotonically increasing PostgreSQL revisions; a stale update receives the current server snapshot instead of silently overwriting it. Embedded images and other Excalidraw files are uploaded through the authenticated API and kept in MinIO rather than inside PostgreSQL. Current limits are 5 MB per scene snapshot and 25 MB per object and can be changed with `MAX_SNAPSHOT_BYTES` and `MAX_OBJECT_BYTES` on `flowdraw-api`.
+
+This version uses snapshot-level optimistic concurrency rather than a CRDT. It keeps all clients consistent and prevents stale database writes, but two people changing the same room at precisely the same time may cause one client to reload the winning snapshot. Element-level CRDT merging and user cursors can be added later without changing the storage topology.
 
 ## L. Normal deployments
 
@@ -165,6 +185,9 @@ Push to `main`; pull requests only run checks. The deploy job writes `GHCR_OWNER
 cd /opt/apps/flowdraw
 docker compose ps
 docker compose logs --tail=200 flowdraw
+docker compose logs --tail=200 flowdraw-api
+docker compose logs --tail=200 postgres
+docker compose logs --tail=200 minio
 container_id=$(docker compose ps -q flowdraw)
 docker inspect --format='{{.State.Health.Status}}' "$container_id"
 
@@ -186,6 +209,18 @@ docker compose ps
 ```
 
 No source checkout or rebuild is needed. Repeat with a newer SHA to roll forward.
+
+## Database and object backups
+
+Back up PostgreSQL regularly and copy the resulting archive off the VPS:
+
+```sh
+cd /opt/apps/flowdraw
+umask 077
+docker compose exec -T postgres pg_dump -U flowdraw -d flowdraw -Fc > flowdraw-postgres.dump
+```
+
+MinIO data lives in the `minio_data` named volume. Use a provider-level volume snapshot or a dedicated backup container/tool that copies the bucket to remote S3-compatible storage. A database backup without the matching MinIO bucket is incomplete because PostgreSQL stores object metadata while MinIO stores the bytes. Test both restoration paths before relying on them.
 
 ## O. Update Caddy
 
@@ -229,6 +264,8 @@ The runtime config uses `try_files {path} /index.html`; rebuild/redeploy if an o
 ## Security notes
 
 - Flowdraw's port 80 is internal only.
+- PostgreSQL and MinIO are reachable only on the internal `backend` network.
+- Room edit keys are capabilities: anyone with the complete invite link can edit that room.
 - Its root filesystem is read-only with temporary `/data` and `/config`, plus `no-new-privileges`.
 - The Docker socket is never mounted into Flowdraw.
 - `VITE_*` values are compiled into public browser JavaScript. Never use them for passwords, tokens, private keys, or secrets.
