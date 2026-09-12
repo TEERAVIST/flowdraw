@@ -1,0 +1,5 @@
+# This file belongs to the shared gateway at /opt/apps/gateway/Caddyfile.
+# Replace the example hostname after its DNS record points to the VPS.
+flowdraw.example.com {
+    reverse_proxy flowdraw:80
+}

@@ -1,0 +1,14 @@
+:80 {
+    root * /srv
+    encode zstd gzip
+
+    # React/Vite SPA fallback for direct navigation to client-side routes.
+    try_files {path} /index.html
+    file_server
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+}

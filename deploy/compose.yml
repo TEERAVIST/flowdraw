@@ -1,0 +1,19 @@
+services:
+  flowdraw:
+    image: ghcr.io/${GHCR_OWNER}/flowdraw:${IMAGE_TAG}
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - proxy
+    read_only: true
+    tmpfs:
+      - /data
+      - /config
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  proxy:
+    external: true
+    name: proxy
