@@ -86,15 +86,33 @@ async function initialize() {
       created_at timestamptz NOT NULL DEFAULT now()
     );
   `);
-  if (!(await storage.bucketExists(bucket))) await storage.makeBucket(bucket);
+  if (!(await storage.bucketExists(bucket))) {
+    throw new Error(`Required object-storage bucket ${bucket} does not exist`);
+  }
+}
+
+async function readiness() {
+  try {
+    const [, bucketAvailable] = await Promise.all([
+      pool.query("SELECT 1"),
+      storage.bucketExists(bucket),
+    ]);
+    return bucketAvailable;
+  } catch {
+    return false;
+  }
 }
 
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
-    if (url.pathname === "/api/health") {
-      await pool.query("SELECT 1");
-      return json(response, 200, { status: "ok" });
+    if (["/health/live", "/api/health/live"].includes(url.pathname)) {
+      return json(response, 200, { status: "alive" });
+    }
+    if (["/health/ready", "/api/health/ready", "/api/health"].includes(url.pathname)) {
+      return (await readiness())
+        ? json(response, 200, { status: "ready" })
+        : json(response, 503, { status: "not ready" });
     }
 
     if (request.method === "POST" && url.pathname === "/api/rooms") {
@@ -143,8 +161,10 @@ server.on("upgrade", async (request, socket, head) => {
   try {
     const url = new URL(request.url, "http://localhost");
     const roomId = url.searchParams.get("room");
-    const token = url.searchParams.get("token");
-    if (url.pathname !== "/ws" || !roomId || !(await authorizeRoom(roomId, token))) return socket.destroy();
+    if (
+      url.pathname !== "/ws" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(roomId || "")
+    ) return socket.destroy();
     request.roomId = roomId;
     sockets.handleUpgrade(request, socket, head, (websocket) => sockets.emit("connection", websocket, request));
   } catch (error) {
@@ -155,15 +175,42 @@ server.on("upgrade", async (request, socket, head) => {
 
 sockets.on("connection", async (socket, request) => {
   const roomId = request.roomId;
-  const clients = roomClients.get(roomId) || new Set();
-  clients.add(socket);
-  roomClients.set(roomId, clients);
-  const current = await pool.query("SELECT snapshot, revision FROM rooms WHERE id=$1", [roomId]);
-  socket.send(JSON.stringify({ type: "snapshot", snapshot: current.rows[0].snapshot, revision: Number(current.rows[0].revision) }));
+  let clients;
+  let authenticated = false;
+  let authenticationPending = false;
+  const authenticationTimer = setTimeout(
+    () => socket.close(1008, "Authentication required"),
+    5000,
+  );
 
   socket.on("message", async (raw) => {
     try {
       const message = JSON.parse(raw.toString());
+      if (!authenticated) {
+        if (
+          authenticationPending ||
+          message.type !== "authenticate" ||
+          typeof message.token !== "string"
+        ) {
+          return socket.close(1008, "Authentication required");
+        }
+        authenticationPending = true;
+        if (!(await authorizeRoom(roomId, message.token))) {
+          return socket.close(1008, "Authentication failed");
+        }
+        authenticated = true;
+        clearTimeout(authenticationTimer);
+        clients = roomClients.get(roomId) || new Set();
+        clients.add(socket);
+        roomClients.set(roomId, clients);
+        const current = await pool.query("SELECT snapshot, revision FROM rooms WHERE id=$1", [roomId]);
+        socket.send(JSON.stringify({
+          type: "snapshot",
+          snapshot: current.rows[0].snapshot,
+          revision: Number(current.rows[0].revision),
+        }));
+        return;
+      }
       if (message.type === "presence") {
         for (const peer of clients) if (peer !== socket && peer.readyState === 1) peer.send(JSON.stringify(message));
         return;
@@ -183,8 +230,9 @@ sockets.on("connection", async (socket, request) => {
     }
   });
   socket.on("close", () => {
-    clients.delete(socket);
-    if (!clients.size) roomClients.delete(roomId);
+    clearTimeout(authenticationTimer);
+    clients?.delete(socket);
+    if (clients && !clients.size) roomClients.delete(roomId);
   });
 });
 

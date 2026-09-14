@@ -1,14 +1,30 @@
 export function readRoomCredentials() {
-  const params = new URLSearchParams(window.location.search);
+  const fragment = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const params = new URLSearchParams(fragment);
   const roomId = params.get("room");
   const token = params.get("key");
-  return roomId && token ? { roomId, token } : null;
+  if (roomId && token) return { roomId, token };
+
+  // One-time compatibility migration for links created by older versions.
+  const legacy = new URLSearchParams(window.location.search);
+  const legacyRoomId = legacy.get("room");
+  const legacyToken = legacy.get("key");
+  if (!legacyRoomId || !legacyToken) return null;
+  const credentials = { roomId: legacyRoomId, token: legacyToken };
+  writeRoomCredentials(credentials);
+  return credentials;
 }
 
 export function writeRoomCredentials(credentials) {
   const url = new URL(window.location.href);
-  url.searchParams.set("room", credentials.roomId);
-  url.searchParams.set("key", credentials.token);
+  url.searchParams.delete("room");
+  url.searchParams.delete("key");
+  url.hash = new URLSearchParams({
+    room: credentials.roomId,
+    key: credentials.token,
+  }).toString();
   window.history.replaceState(null, "", url);
 }
 
@@ -69,8 +85,13 @@ export function connectToRoom(credentials, handlers) {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL("/ws", `${protocol}//${window.location.host}`);
     url.searchParams.set("room", credentials.roomId);
-    url.searchParams.set("token", credentials.token);
     socket = new WebSocket(url);
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({
+        type: "authenticate",
+        token: credentials.token,
+      }));
+    });
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
       if (message.type !== "snapshot") return;

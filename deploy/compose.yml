@@ -26,8 +26,8 @@ services:
       S3_PORT: "9000"
       S3_USE_SSL: "false"
       S3_BUCKET: flowdraw
-      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_ACCESS_KEY: ${FLOWDRAW_S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${FLOWDRAW_S3_SECRET_KEY}
     expose:
       - "3000"
     networks:
@@ -49,7 +49,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:3000/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s

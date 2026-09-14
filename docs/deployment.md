@@ -2,7 +2,7 @@
 
 ## Architecture
 
-GitHub Actions runs pnpm checks, builds the frontend and API images, pushes immutable `sha-<commit>` tags to GHCR, and deploys those exact images over SSH. The VPS only pulls and runs images. A separately managed Caddy gateway owns ports 80/443. The API provides WebSocket room synchronization, PostgreSQL stores room snapshots, and MinIO stores shared binary objects.
+GitHub Actions runs pnpm checks, builds the frontend and API images, pushes immutable `sha-<commit>` tags to GHCR, and deploys those exact images over SSH. The VPS only pulls and runs images. A separately managed Caddy gateway owns ports 80/443 behind Cloudflare. Cloudflare is the public edge, Caddy is the platform ingress, Docker runs the workloads, and PostgreSQL is the source of truth. The API provides WebSocket room synchronization, while MinIO stores shared binary objects.
 
 ```text
 /opt/apps/
@@ -18,6 +18,8 @@ GitHub Actions runs pnpm checks, builds the frontend and API images, pushes immu
 
 No application, database, or object store publishes a host port. Only Caddy is internet-facing. PostgreSQL and MinIO communicate with the API on an internal Docker network.
 
+Compose `expose` entries document container ports for peer services; unlike `ports`, they do not publish those ports on the VPS host. The external `proxy` network is shared with the gateway. The project-scoped `backend` network is internal and belongs only to Flowdraw's API, PostgreSQL, and MinIO services.
+
 ## A. One-time VPS setup
 
 Connect to Ubuntu as the initial administrator:
@@ -28,7 +30,7 @@ apt-get update
 apt-get upgrade -y
 ```
 
-Configure the Hetzner firewall for SSH, TCP 80, TCP 443, and UDP 443. Restrict SSH by source IP when practical.
+Configure the Hetzner firewall for SSH, TCP 80, TCP 443, and UDP 443. Restrict SSH by source IP when practical. After HTTPS works, optionally restrict web ingress to Cloudflare's published IP ranges; keep those ranges updated and preserve a recovery path through the Hetzner console.
 
 ## B–C. Install Docker Engine and Compose
 
@@ -73,6 +75,14 @@ Copy infrastructure files once from the development machine (not application sou
 scp deploy/compose.yml deploy@YOUR_VPS_IP:/opt/apps/flowdraw/compose.yml
 scp deploy/gateway.compose.yml deploy@YOUR_VPS_IP:/opt/apps/gateway/compose.yml
 scp deploy/Caddyfile.example deploy@YOUR_VPS_IP:/opt/apps/gateway/Caddyfile
+scp deploy/gateway.env.example deploy@YOUR_VPS_IP:/opt/apps/gateway/.env
+scp deploy/minio-flowdraw-policy.json deploy/provision-minio.sh deploy@YOUR_VPS_IP:/opt/apps/flowdraw/
+```
+
+Edit `/opt/apps/gateway/.env`:
+
+```dotenv
+FLOWDRAW_HOSTNAME=flowdraw.k1n3ticnerdcore.tech
 ```
 
 Create `/opt/apps/flowdraw/.env` on the VPS:
@@ -83,16 +93,29 @@ IMAGE_TAG=sha-full-git-commit
 POSTGRES_PASSWORD=long-independent-random-value
 MINIO_ROOT_USER=random-access-key
 MINIO_ROOT_PASSWORD=long-independent-random-value
+FLOWDRAW_S3_ACCESS_KEY=dedicated-flowdraw-access-key
+FLOWDRAW_S3_SECRET_KEY=dedicated-flowdraw-secret-key
 ```
 
-Generate independent values with `openssl rand -base64 32`. GitHub Actions rewrites only `GHCR_OWNER` and `IMAGE_TAG`; it preserves the three server secrets. Production does not depend on `latest`. Never commit the real `.env`, and set `chmod 600 /opt/apps/flowdraw/.env`.
+Generate independent values with `openssl rand -base64 32`. The Flowdraw S3 values must not equal either MinIO root value. GitHub Actions rewrites only `GHCR_OWNER` and `IMAGE_TAG`; it preserves the server secrets. Production does not depend on `latest`. Never commit the real `.env`, and set `chmod 600 /opt/apps/flowdraw/.env`.
+
+Start only the data services and provision the bucket-scoped Flowdraw identity once:
+
+```sh
+cd /opt/apps/flowdraw
+docker compose up -d postgres minio
+chmod 700 provision-minio.sh
+./provision-minio.sh
+```
+
+The provisioning command runs an ephemeral MinIO client container; it does not add another persistent service. Root credentials are used only inside that administrative command and by the MinIO container. `flowdraw-api` receives only `FLOWDRAW_S3_ACCESS_KEY` and `FLOWDRAW_S3_SECRET_KEY`. The attached policy permits bucket inspection/listing and object reads/writes only within `flowdraw`; it does not grant object deletion, console access, or access to other buckets.
 
 ## G. Configure Caddy
 
 Edit `/opt/apps/gateway/Caddyfile`:
 
 ```caddyfile
-flowdraw.example.com {
+{$FLOWDRAW_HOSTNAME} {
     handle /api/* {
         reverse_proxy flowdraw-api:3000
     }
@@ -113,11 +136,24 @@ docker compose up -d
 docker compose ps
 ```
 
-Caddy is the only service publishing 80/443 and automatically manages HTTPS after DNS is correct.
+Caddy is the only service publishing 80/443 and automatically manages the origin certificate after DNS is correct. Caddy automatically proxies WebSocket upgrades on `/ws`; no special WebSocket header configuration is required.
+
+`FLOWDRAW_HOSTNAME` comes from the shared gateway's `.env`. The application image and Flowdraw Compose project therefore do not bake in a production hostname. Add future SaaS hostnames as separate site blocks and environment values in this shared gateway project.
 
 ## H. Configure DNS
 
-Create an `A` record for the selected hostname pointing to the VPS IPv4 address. Add `AAAA` only when IPv6 is configured. Wait for DNS propagation before diagnosing certificate issuance.
+In the Cloudflare DNS dashboard, create a proxied (orange-cloud) `A` record:
+
+```text
+Type: A
+Name: flowdraw
+Content: YOUR_VPS_IPV4
+Proxy status: Proxied
+```
+
+Add `AAAA` only when IPv6 is configured on both the VPS and firewall. In Cloudflare SSL/TLS, select **Full (strict)**, enable **Always Use HTTPS**, and leave WebSockets enabled. Do not use Flexible TLS because traffic from Cloudflare to Caddy must remain encrypted and authenticated.
+
+The resulting public URL is `https://flowdraw.k1n3ticnerdcore.tech`. Caddy should still terminate TLS at the origin; Cloudflare does not replace the platform ingress.
 
 ## I. Configure GitHub Secrets
 
@@ -128,7 +164,7 @@ Under **Repository Settings → Secrets and variables → Actions**, create:
 - `VPS_SSH_KEY`: private deployment key including BEGIN/END lines.
 - `VPS_PORT`: normally `22`.
 - `VPS_KNOWN_HOSTS`: verified SSH host-key line.
-- `APP_URL`: public origin without a trailing slash, such as `https://flowdraw.example.com`.
+- `APP_URL`: `https://flowdraw.k1n3ticnerdcore.tech`.
 
 Generate the known-hosts value from a trusted workstation, then verify its fingerprint against the VPS console:
 
@@ -169,7 +205,15 @@ On its first start, the API creates the required database tables and the private
 
 ## Live collaboration and storage
 
-Select **Start live room** in Flowdraw and share the copied invite URL. The URL contains both the room ID and a 256-bit edit key. Everyone using that link can edit, so treat it like a password and do not post it publicly. The edit key is stored in PostgreSQL only as a SHA-256 hash.
+Select **Start live room** in Flowdraw and share the copied invite URL. Its URL fragment contains both the room ID and a 256-bit edit key. Fragments are not sent in HTTP request targets. The browser sends the edit key only as the first WebSocket application message after connecting to `/ws?room=<non-secret-id>`; the server does not log that message. Everyone using the complete link can edit, so treat it like a password and do not post it publicly. The edit key is stored in PostgreSQL only as a SHA-256 hash.
+
+Links made by the earlier query-parameter version are migrated to fragment form when opened. Because the original HTTP request already contained the old query string, rotate the room/link if it may have entered proxy, browser, or analytics logs.
+
+## Health semantics
+
+- `GET /health/live` checks only that the Node HTTP process can respond. Docker uses this endpoint, so a temporary PostgreSQL or MinIO outage does not mark the process dead or trigger a restart loop.
+- `GET /health/ready` checks PostgreSQL and the required MinIO bucket. It returns a failure while either dependency is unavailable.
+- `/api/health/live` and `/api/health/ready` expose the same checks through the existing Caddy `/api/*` route. `/api/health` remains a readiness alias for compatibility.
 
 Scene elements, flows, junctions, packets, and object references are synchronized through `/ws`. Snapshots use monotonically increasing PostgreSQL revisions; a stale update receives the current server snapshot instead of silently overwriting it. Embedded images and other Excalidraw files are uploaded through the authenticated API and kept in MinIO rather than inside PostgreSQL. Current limits are 5 MB per scene snapshot and 25 MB per object and can be changed with `MAX_SNAPSHOT_BYTES` and `MAX_OBJECT_BYTES` on `flowdraw-api`.
 
@@ -255,7 +299,7 @@ Run `docker network inspect proxy`, confirm both containers are attached, confir
 
 ### HTTPS fails
 
-Check DNS, firewall access to 80/443, and that only the gateway publishes those ports.
+Confirm that the Cloudflare record is proxied, SSL mode is **Full (strict)**, Caddy can obtain or load a valid certificate, the firewall permits the required origin traffic, and only the gateway publishes ports 80/443.
 
 ### Direct SPA routes return 404
 
@@ -265,6 +309,7 @@ The runtime config uses `try_files {path} /index.html`; rebuild/redeploy if an o
 
 - Flowdraw's port 80 is internal only.
 - PostgreSQL and MinIO are reachable only on the internal `backend` network.
+- MinIO root credentials are administrative only. The API uses the dedicated `flowdraw-app` policy identity and cannot access other buckets. Never expose the MinIO console as a workaround.
 - Room edit keys are capabilities: anyone with the complete invite link can edit that room.
 - Its root filesystem is read-only with temporary `/data` and `/config`, plus `no-new-privileges`.
 - The Docker socket is never mounted into Flowdraw.

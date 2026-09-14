@@ -148,4 +148,4 @@ jobs:
           VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
           ssh -p "${VPS_PORT:-22}" "$VPS_USER@$VPS_HOST" 'cd /opt/apps/flowdraw && for service in flowdraw flowdraw-api; do container_id=$(docker compose -f compose.yml ps -q "$service"); test -n "$container_id" || exit 1; healthy=false; for attempt in $(seq 1 12); do status=$(docker inspect --format="{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" "$container_id"); if [ "$status" = healthy ]; then healthy=true; break; fi; if [ "$status" = unhealthy ] || [ "$status" = exited ]; then break; fi; sleep 5; done; if [ "$healthy" != true ]; then docker logs --tail 100 "$container_id"; exit 1; fi; done'
-          curl --fail --silent --show-error "$APP_URL/api/health"
+          curl --fail --silent --show-error "$APP_URL/api/health/ready"
