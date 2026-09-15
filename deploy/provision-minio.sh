@@ -14,7 +14,7 @@ docker run --rm \
   --env-file .env \
   -v "$(pwd)/minio-flowdraw-policy.json:/policy.json:ro" \
   --entrypoint /bin/sh \
-  minio/mc:latest \
+  quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
   -c '
     set -eu
     mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
