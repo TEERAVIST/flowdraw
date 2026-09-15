@@ -56,12 +56,12 @@ func (m *memoryStore) VerifyEmail(_ context.Context, d [32]byte, n time.Time) er
 	m.verified = true
 	return nil
 }
-func (m *memoryStore) ResetPassword(_ context.Context, d [32]byte, _ string, n time.Time) error {
+func (m *memoryStore) ResetPassword(_ context.Context, d [32]byte, _ string, n time.Time) (*User, error) {
 	if e := m.consume(ResetPassword, d, n); e != nil {
-		return e
+		return nil, e
 	}
 	m.revoked = true
-	return nil
+	return m.user, nil
 }
 
 type fakeSender struct {

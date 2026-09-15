@@ -16,6 +16,7 @@
     "@excalidraw/excalidraw": "^0.18.1",
     "gifenc": "^1.0.3",
     "minio": "^8.0.6",
+    "openid-client": "6.8.8",
     "pg": "^8.16.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

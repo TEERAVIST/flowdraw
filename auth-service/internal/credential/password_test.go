@@ -23,3 +23,18 @@ func TestRejectsExpensiveHashParameters(t *testing.T) {
 		t.Fatal("expected parameter limit error")
 	}
 }
+
+func TestMalformedParametersDoNotPanicOrAllocateUnbounded(t *testing.T) {
+	for _, hash := range []string{
+		"$argon2id$v=19$app=1$m=65536,t=0,p=2$c2FsdA$a2V5",
+		"$argon2id$v=19$app=1$m=65536,t=3,p=0$c2FsdA$a2V5",
+		"$argon2id$v=19$app=1$m=65536,t=3,p=2$c2FsdA$",
+	} {
+		if ok, err := Verify(hash, "some password"); err == nil || ok {
+			t.Fatal("accepted malformed hash")
+		}
+	}
+	if _, err := Hash("some long password", Parameters{}); err == nil {
+		t.Fatal("accepted zero parameters")
+	}
+}

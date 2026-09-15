@@ -13,3 +13,10 @@
         reverse_proxy flowdraw:80
     }
 }
+
+# Do not enable access/body logging on authentication routes or callback URLs.
+auth.k1n3ticnerdcore.tech {
+    reverse_proxy auth-service:8080 {
+        header_up X-Auth-Client-IP {http.request.remote.host}
+    }
+}

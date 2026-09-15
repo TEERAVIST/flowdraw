@@ -18,6 +18,10 @@ services:
     restart: unless-stopped
     environment:
       PORT: "3000"
+      FLOWDRAW_AUTH_ISSUER: ${FLOWDRAW_AUTH_ISSUER:-}
+      FLOWDRAW_PUBLIC_URL: ${FLOWDRAW_PUBLIC_URL:-}
+      FLOWDRAW_CLIENT_SECRET: ${FLOWDRAW_CLIENT_SECRET:-}
+      FLOWDRAW_SESSION_KEY: ${FLOWDRAW_SESSION_KEY:-}
       PGHOST: postgres
       PGDATABASE: flowdraw
       PGUSER: flowdraw

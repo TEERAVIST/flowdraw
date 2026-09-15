@@ -24,8 +24,11 @@ type Parameters struct {
 var DefaultParameters = Parameters{Version: 1, Memory: 64 * 1024, Time: 3, Threads: 2, SaltLen: 16, KeyLen: 32}
 
 func Hash(password string, p Parameters) (string, error) {
-	if len(password) < 12 {
-		return "", errors.New("password must contain at least 12 characters")
+	if len(password) < 12 || len(password) > 1024 {
+		return "", errors.New("password must contain 12 to 1024 bytes")
+	}
+	if p.Version != 1 || p.Time < 1 || p.Time > 10 || p.Threads < 1 || p.Threads > 16 || p.Memory < 8*uint32(p.Threads) || p.Memory > 256*1024 || p.SaltLen < 16 || p.SaltLen > 64 || p.KeyLen < 32 || p.KeyLen > 64 {
+		return "", errors.New("invalid password parameters")
 	}
 	salt := make([]byte, p.SaltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -37,8 +40,11 @@ func Hash(password string, p Parameters) (string, error) {
 }
 
 func Verify(encoded, password string) (bool, error) {
+	if len(encoded) > 512 {
+		return false, errors.New("invalid password hash")
+	}
 	parts := strings.Split(encoded, "$")
-	if len(parts) != 7 || parts[1] != "argon2id" || parts[2] != "v=19" {
+	if len(parts) != 7 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != "v=19" || parts[3] != "app=1" {
 		return false, errors.New("invalid password hash")
 	}
 	var p Parameters
@@ -47,7 +53,7 @@ func Verify(encoded, password string) (bool, error) {
 	}
 	var threads uint64
 	fields := strings.Split(parts[4], ",")
-	if len(fields) != 3 {
+	if len(fields) != 3 || !strings.HasPrefix(fields[0], "m=") || !strings.HasPrefix(fields[1], "t=") || !strings.HasPrefix(fields[2], "p=") {
 		return false, errors.New("invalid password parameters")
 	}
 	memory, err := strconv.ParseUint(strings.TrimPrefix(fields[0], "m="), 10, 32)
@@ -62,7 +68,7 @@ func Verify(encoded, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if memory > 256*1024 || timeCost > 10 || threads > 16 {
+	if p.Version != 1 || memory < 8*threads || memory > 256*1024 || timeCost < 1 || timeCost > 10 || threads < 1 || threads > 16 || len(password) > 1024 {
 		return false, errors.New("password parameters exceed limits")
 	}
 	b64 := base64.RawStdEncoding
@@ -74,6 +80,14 @@ func Verify(encoded, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if len(salt) < 16 || len(salt) > 64 || len(expected) < 32 || len(expected) > 64 {
+		return false, errors.New("invalid salt or key length")
+	}
 	actual := argon2.IDKey([]byte(password), salt, uint32(timeCost), uint32(memory), uint8(threads), uint32(len(expected)))
 	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
+}
+
+func NeedsRehash(encoded string) bool {
+	p := DefaultParameters
+	return !strings.HasPrefix(encoded, fmt.Sprintf("$argon2id$v=19$app=%d$m=%d,t=%d,p=%d$", p.Version, p.Memory, p.Time, p.Threads))
 }

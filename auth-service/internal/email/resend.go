@@ -7,22 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/mail"
 	"strings"
 	"time"
 )
 
-var ErrRateLimited = errors.New("email provider rate limited")
-
-type ProviderError struct {
-	Status int
-	Type   string
-}
-
-func (e *ProviderError) Error() string {
-	return fmt.Sprintf("email provider rejected request (status %d, type %q)", e.Status, e.Type)
-}
+var (
+	ErrRateLimited = errors.New("email provider rate limited")
+	ErrTimeout     = errors.New("email provider timeout")
+	ErrPermanent   = errors.New("email provider permanent failure")
+	ErrTransient   = errors.New("email provider transient failure")
+)
 
 type ResendSender struct {
 	apiKey, from, endpoint string
@@ -36,6 +33,20 @@ func NewResendSender(apiKey, fromAddress, fromName string, client *http.Client) 
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
+	if strings.ContainsAny(fromName+fromAddress, "\r\n") {
+		return nil, errors.New("invalid sender")
+	}
+	address, err := mail.ParseAddress(strings.TrimSpace(fromAddress))
+	if err != nil || address.Address != strings.TrimSpace(fromAddress) || !strings.Contains(address.Address, "@") {
+		return nil, errors.New("EMAIL_FROM must be a bare email address")
+	}
+	// Copy caller configuration; enforce a bound and never forward credentials on redirects.
+	bounded := *client
+	if bounded.Timeout <= 0 || bounded.Timeout > 5*time.Second {
+		bounded.Timeout = 5 * time.Second
+	}
+	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &bounded
 	from := (&mail.Address{Name: strings.TrimSpace(fromName), Address: strings.TrimSpace(fromAddress)}).String()
 	return &ResendSender{apiKey: apiKey, from: from, endpoint: "https://api.resend.com/emails", client: client}, nil
 }
@@ -67,19 +78,23 @@ func (s *ResendSender) send(ctx context.Context, to, idempotencyKey string, c co
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send email: %w", err)
+		var ne net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+			return ErrTimeout
+		}
+		return ErrTransient
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return nil
 	}
-	var p struct {
-		Type string `json:"name"`
-	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&p)
+	// Never propagate provider-controlled payloads into logs or public errors.
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("%w: %s", ErrRateLimited, p.Type)
+		return ErrRateLimited
 	}
-	return &ProviderError{Status: resp.StatusCode, Type: p.Type}
+	if resp.StatusCode >= 500 {
+		return ErrTransient
+	}
+	return ErrPermanent
 }

@@ -24,6 +24,7 @@ import {
   cleanFlowMetadata,
   inferJunctionTopology,
 } from "./lib/topology.js";
+import { AccountMenu } from "./components/AccountMenu.jsx";
 import { FlowPatternSelect } from "./components/FlowPatternSelect.jsx";
 import { exportAnimation } from "./lib/animationExport.js";
 import {
@@ -2498,6 +2499,7 @@ function App() {
 
         <div className={`collaboration-status collaboration-status--${collaborationStatus}`}>
           <span>{roomCredentials ? `Live: ${collaborationStatus}` : "Local only"}</span>
+          <AccountMenu />
           {!roomCredentials && (
             <button type="button" onClick={startCollaboration}>Start live room</button>
           )}

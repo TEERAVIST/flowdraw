@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -53,7 +55,7 @@ func encodeRequest(request fosite.Requester, accessSignature string) ([]byte, ti
 		ID: request.GetID(), RequestedAt: request.GetRequestedAt(), ClientID: request.GetClient().GetID(),
 		RequestedScope: request.GetRequestedScopes(), GrantedScope: request.GetGrantedScopes(),
 		RequestedAudience: request.GetRequestedAudience(), GrantedAudience: request.GetGrantedAudience(),
-		Form: request.GetRequestForm(), Session: session, AccessSignature: accessSignature,
+		Form: safeForm(request.GetRequestForm()), Session: session, AccessSignature: accessSignature,
 	})
 	expires := session.GetExpiresAt(fosite.RefreshToken)
 	if codeExpiry := session.GetExpiresAt(fosite.AuthorizeCode); codeExpiry.After(expires) {
@@ -87,7 +89,7 @@ func (s *OAuthStore) decodeRequest(ctx context.Context, payload []byte) (fosite.
 
 func (s *OAuthStore) GetClient(ctx context.Context, id string) (fosite.Client, error) {
 	var client fosite.DefaultClient
-	err := s.DB.QueryRow(ctx, `SELECT id, secret_hash, redirect_uris, grant_types, response_types, scopes FROM oauth_clients WHERE id=$1 AND enabled`, id).
+	err := s.executor(ctx).QueryRow(ctx, `SELECT id, secret_hash, redirect_uris, grant_types, response_types, scopes FROM oauth_clients WHERE id=$1 AND enabled`, id).
 		Scan(&client.ID, &client.Secret, &client.RedirectURIs, &client.GrantTypes, &client.ResponseTypes, &client.Scopes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fosite.ErrNotFound
@@ -100,7 +102,7 @@ func (s *OAuthStore) GetClient(ctx context.Context, id string) (fosite.Client, e
 
 func (s *OAuthStore) ClientAssertionJWTValid(ctx context.Context, jti string) error {
 	var exists bool
-	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM oauth_client_jtis WHERE jti=$1 AND expires_at>now())`, jti).Scan(&exists)
+	err := s.executor(ctx).QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM oauth_client_jtis WHERE jti=$1 AND expires_at>now())`, jti).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -130,14 +132,14 @@ func (s *OAuthStore) put(ctx context.Context, kind, signature, accessSignature s
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, `INSERT INTO oauth_sessions(kind,signature,request_id,payload,expires_at) VALUES($1,$2,$3,$4,$5)`, kind, signature, request.GetID(), payload, expires)
+	_, err = s.executor(ctx).Exec(ctx, `INSERT INTO oauth_sessions(kind,signature,request_id,payload,expires_at) VALUES($1,$2,$3,$4,$5)`, kind, signatureDigest(signature), request.GetID(), payload, expires)
 	return err
 }
 
 func (s *OAuthStore) get(ctx context.Context, kind, signature string, invalidError error) (fosite.Requester, error) {
 	var payload []byte
 	var active bool
-	err := s.DB.QueryRow(ctx, `SELECT payload, active FROM oauth_sessions WHERE kind=$1 AND signature=$2 AND expires_at>now()`, kind, signature).Scan(&payload, &active)
+	err := s.executor(ctx).QueryRow(ctx, `SELECT payload, active FROM oauth_sessions WHERE kind=$1 AND signature=$2 AND expires_at>now()`, kind, signatureDigest(signature)).Scan(&payload, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fosite.ErrNotFound
 	}
@@ -155,7 +157,7 @@ func (s *OAuthStore) get(ctx context.Context, kind, signature string, invalidErr
 }
 
 func (s *OAuthStore) delete(ctx context.Context, kind, signature string) error {
-	result, err := s.DB.Exec(ctx, `DELETE FROM oauth_sessions WHERE kind=$1 AND signature=$2`, kind, signature)
+	result, err := s.executor(ctx).Exec(ctx, `DELETE FROM oauth_sessions WHERE kind=$1 AND signature=$2`, kind, signatureDigest(signature))
 	if err != nil {
 		return err
 	}
@@ -172,7 +174,10 @@ func (s *OAuthStore) GetAuthorizeCodeSession(ctx context.Context, signature stri
 	return s.get(ctx, kindCode, signature, fosite.ErrInvalidatedAuthorizeCode)
 }
 func (s *OAuthStore) InvalidateAuthorizeCodeSession(ctx context.Context, signature string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND signature=$2`, kindCode, signature)
+	result, err := s.executor(ctx).Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND signature=$2 AND active`, kindCode, signatureDigest(signature))
+	if err == nil && result.RowsAffected() != 1 {
+		return fosite.ErrInvalidatedAuthorizeCode
+	}
 	return err
 }
 func (s *OAuthStore) CreateAccessTokenSession(ctx context.Context, signature string, request fosite.Requester) error {
@@ -194,15 +199,21 @@ func (s *OAuthStore) DeleteRefreshTokenSession(ctx context.Context, signature st
 	return s.delete(ctx, kindRefresh, signature)
 }
 func (s *OAuthStore) RotateRefreshToken(ctx context.Context, requestID, signature string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2 AND signature<>$3`, kindRefresh, requestID, signature)
-	return err
+	result, err := s.executor(ctx).Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2 AND signature=$3 AND active`, kindRefresh, requestID, signatureDigest(signature))
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return fosite.ErrInactiveToken
+	}
+	return s.RevokeAccessToken(ctx, requestID)
 }
 func (s *OAuthStore) RevokeRefreshToken(ctx context.Context, requestID string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2`, kindRefresh, requestID)
+	_, err := s.executor(ctx).Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2`, kindRefresh, requestID)
 	return err
 }
 func (s *OAuthStore) RevokeAccessToken(ctx context.Context, requestID string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2`, kindAccess, requestID)
+	_, err := s.executor(ctx).Exec(ctx, `UPDATE oauth_sessions SET active=false WHERE kind=$1 AND request_id=$2`, kindAccess, requestID)
 	return err
 }
 func (s *OAuthStore) CreatePKCERequestSession(ctx context.Context, signature string, request fosite.Requester) error {
@@ -222,4 +233,18 @@ func (s *OAuthStore) GetOpenIDConnectSession(ctx context.Context, signature stri
 }
 func (s *OAuthStore) DeleteOpenIDConnectSession(ctx context.Context, signature string) error {
 	return s.delete(ctx, kindOIDC, signature)
+}
+
+func signatureDigest(value string) string {
+	d := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(d[:])
+}
+func safeForm(form url.Values) url.Values {
+	result := make(url.Values)
+	for _, key := range []string{"client_id", "redirect_uri", "response_type", "scope", "nonce", "code_challenge", "code_challenge_method", "prompt", "max_age"} {
+		if values, ok := form[key]; ok {
+			result[key] = append([]string(nil), values...)
+		}
+	}
+	return result
 }

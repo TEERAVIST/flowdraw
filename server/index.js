@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { createAuth } from "./auth.js";
 import { Client as MinioClient } from "minio";
 import pg from "pg";
 import { WebSocketServer } from "ws";
@@ -18,6 +19,7 @@ const pool = new Pool(process.env.DATABASE_URL
       user: process.env.PGUSER || "flowdraw",
       password: required("PGPASSWORD"),
     });
+const auth = createAuth({ pool });
 const storage = new MinioClient({
   endPoint: process.env.S3_ENDPOINT || "minio",
   port: Number(process.env.S3_PORT || 9000),
@@ -68,6 +70,7 @@ async function authorizeRoom(roomId, token) {
 }
 
 async function initialize() {
+  await auth.initialize();
   await pool.query(`
     CREATE TABLE IF NOT EXISTS rooms (
       id uuid PRIMARY KEY,
@@ -106,6 +109,7 @@ async function readiness() {
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
+    if (await auth.handle(request, response, url)) return;
     if (["/health/live", "/api/health/live"].includes(url.pathname)) {
       return json(response, 200, { status: "alive" });
     }

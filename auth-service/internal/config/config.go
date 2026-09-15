@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +55,18 @@ func Load() (Config, error) {
 	if c.EmailProvider != "resend" {
 		return Config{}, fmt.Errorf("unsupported EMAIL_PROVIDER %q", c.EmailProvider)
 	}
+	if err := ValidateHTTPSOrigin(c.PublicURL); err != nil {
+		return Config{}, fmt.Errorf("AUTH_PUBLIC_URL: %w", err)
+	}
+	if err := ValidateHTTPSOrigin(c.Issuer); err != nil {
+		return Config{}, fmt.Errorf("AUTH_ISSUER: %w", err)
+	}
+	if c.Issuer != c.PublicURL {
+		return Config{}, fmt.Errorf("AUTH_ISSUER must equal AUTH_PUBLIC_URL")
+	}
+	if !c.CookieSecure || (os.Getenv("AUTH_COOKIE_SECURE") != "" && os.Getenv("AUTH_COOKIE_SECURE") != "true") {
+		return Config{}, fmt.Errorf("AUTH_COOKIE_SECURE must be true")
+	}
 	return c, nil
 }
 
@@ -73,4 +87,13 @@ func envBool(name string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// ValidateHTTPSOrigin rejects credentials, paths and fragments in the public origin.
+func ValidateHTTPSOrigin(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(value, "\r\n\t ") {
+		return fmt.Errorf("must be an absolute HTTPS origin without credentials, path, query or fragment")
+	}
+	return nil
 }

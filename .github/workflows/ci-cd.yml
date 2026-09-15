@@ -16,6 +16,17 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      auth-postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: auth_test
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d auth_test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -33,6 +44,29 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: auth-service/go.mod
+          cache-dependency-path: auth-service/go.sum
+
+      - name: Auth formatting, PostgreSQL tests, BFF OIDC tests and vet
+        working-directory: auth-service
+        env:
+          AUTH_TEST_DATABASE_URL: postgres://postgres:test-only-password@localhost:5432/auth_test?sslmode=disable
+          AUTH_TEST_BFF: "1"
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -race ./...
+          go vet ./...
+          go build ./cmd/auth
+
+      - name: Validate deployment configuration
+        run: |
+          docker compose --env-file deploy/.env.example -f deploy/compose.yml config --quiet
+          AUTH_GLOBAL_SECRET=test RESEND_API_KEY=test FLOWDRAW_CLIENT_SECRET=test docker compose --env-file deploy/auth.env.example -f deploy/auth.compose.yml config --quiet
+          docker run --rm -e FLOWDRAW_HOSTNAME=flowdraw.example.com -v "$PWD/deploy/Caddyfile.example:/etc/caddy/Caddyfile:ro" caddy:2.10-alpine caddy adapt --config /etc/caddy/Caddyfile --validate >/dev/null
 
       - name: Lint
         run: pnpm lint
@@ -89,6 +123,26 @@ jobs:
           tags: |
             type=raw,value=sha-${{ github.sha }}
             type=raw,value=latest
+
+      - name: Extract auth image metadata
+        id: auth-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}-auth
+          tags: |
+            type=raw,value=sha-${{ github.sha }}
+            type=raw,value=latest
+
+      - name: Build and push auth image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.auth
+          push: true
+          tags: ${{ steps.auth-meta.outputs.tags }}
+          labels: ${{ steps.auth-meta.outputs.labels }}
+          cache-from: type=gha,scope=auth
+          cache-to: type=gha,mode=max,scope=auth
 
       - name: Build and push image
         uses: docker/build-push-action@v6

@@ -19,3 +19,7 @@ Run `pnpm lint`, `pnpm test`, and `pnpm build` before submitting changes.
 ## Deployment
 
 GitHub Actions builds frontend and API images and pushes them to GHCR; the VPS only pulls and runs images. See [the deployment guide](docs/deployment.md) for Hetzner, Docker Compose, Caddy, PostgreSQL, MinIO, GHCR, CI/CD, backups, and rollback instructions.
+
+## Central authentication
+
+The optional Auth V1 service uses Go, Fosite, Resend and a separate PostgreSQL database. Flowdraw's backend owns its OIDC exchange and product sessions; React receives no OAuth tokens. See [architecture and deployment](docs/auth-architecture.md) and [validation and rollout blockers](docs/auth-validation.md). Provision auth explicitly before enabling the Flowdraw auth environment variables.

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/k1n3ticnerdcore/flowdraw/auth-service/internal/config"
 	"net/url"
 	"time"
 
@@ -51,7 +52,7 @@ func TokenMatches(token string, digest [32]byte) bool {
 
 func fragmentURL(publicURL, path, token string) (string, error) {
 	u, err := url.Parse(publicURL)
-	if err != nil || !u.IsAbs() || u.Scheme != "https" {
+	if err != nil || config.ValidateHTTPSOrigin(publicURL) != nil {
 		return "", errors.New("AUTH_PUBLIC_URL must be an absolute HTTPS URL")
 	}
 	u.Path = path
@@ -61,6 +62,7 @@ func fragmentURL(publicURL, path, token string) (string, error) {
 }
 
 type User struct {
+	AuthTime               time.Time
 	ID, Email, DisplayName string
 	EmailVerified          bool
 }
@@ -68,7 +70,7 @@ type Store interface {
 	FindUserByEmail(context.Context, string) (*User, error)
 	CreateChallenge(context.Context, Challenge) error // must invalidate older active challenges for user/purpose atomically
 	VerifyEmail(context.Context, [32]byte, time.Time) error
-	ResetPassword(context.Context, [32]byte, string, time.Time) error
+	ResetPassword(context.Context, [32]byte, string, time.Time) (*User, error)
 }
 type PasswordHasher interface{ Hash(string) (string, error) }
 type FailureReporter interface {
@@ -126,6 +128,9 @@ func (s Service) SendVerification(ctx context.Context, user User) error {
 func (s Service) ForgotPassword(ctx context.Context, normalizedEmail string) {
 	user, err := s.Store.FindUserByEmail(ctx, normalizedEmail)
 	if err != nil || user == nil {
+		if err != nil && s.Reporter != nil {
+			s.Reporter.EmailFailure(ctx, ResetPassword, err)
+		}
 		return
 	}
 	id, link, err := s.create(ctx, *user, ResetPassword)
@@ -146,7 +151,16 @@ func (s Service) Reset(ctx context.Context, token, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	return s.Store.ResetPassword(ctx, sha256.Sum256([]byte(token)), hash, s.now())
+	user, err := s.Store.ResetPassword(ctx, sha256.Sum256([]byte(token)), hash, s.now())
+	if err != nil {
+		return err
+	}
+	// The database commit is final even when the notification cannot be delivered.
+	digest := sha256.Sum256([]byte(token))
+	if err = s.Sender.SendSecurityAlert(ctx, mail.SecurityAlertMessage{To: user.Email, Event: "Your password was changed. All auth browser sessions were revoked.", IdempotencyKey: fmt.Sprintf("security-%x", digest[:16])}); err != nil && s.Reporter != nil {
+		s.Reporter.EmailFailure(ctx, ResetPassword, err)
+	}
+	return nil
 }
 
 func (s Service) now() time.Time {

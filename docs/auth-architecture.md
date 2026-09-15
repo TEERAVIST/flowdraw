@@ -1,125 +1,154 @@
-# Central authentication platform design
+# Flowdraw centralized Auth V1
 
-## Decision
+## Status
 
-The platform authentication provider is one independently deployable Go application backed by its own PostgreSQL database. It is exposed only through the shared Caddy ingress at `auth.k1n3ticnerdcore.tech`. Product applications integrate through OAuth 2.0/OpenID Connect over HTTPS and never read `auth_db`.
+The repository implements the V1 server, browser flows, Fosite provider, Flowdraw backend integration and deployment definitions. **This is not a production-readiness declaration.** Production credentials, signing keys, the exact deployed Flowdraw hostname, Resend domain verification, delivery/header checks and an ingress smoke test must be provisioned and verified before rollout. See [auth-validation.md](auth-validation.md) for the exact local verification results and limitations.
+
+## Architecture and boundaries
 
 ```text
 Cloudflare -> shared Caddy -> auth-service -> auth-private -> auth-postgres/auth_db
-                         \-> Flowdraw     -> flowdraw-private -> flowdraw-postgres + MinIO
+                         \-> Flowdraw SPA
+                         \-> flowdraw-api -> backend -> Flowdraw PostgreSQL + MinIO
 ```
 
-The shared external `proxy` network contains Caddy, `auth-service`, Flowdraw frontend, and `flowdraw-api`. Each product owns a separate internal network and separate database credentials.
+One Go auth service uses its own PostgreSQL database. Existing Flowdraw frontend, Node backend, room/canvas APIs, WebSocket collaboration and object storage keep their architecture. Caddy is the only public ingress. Auth and product databases are never shared. No Redis, worker, queue, Kubernetes or extra microservice is introduced.
 
-## Fosite evaluation
+`deploy/auth.compose.yml` is an independent Compose project using the shared external `proxy` network. Only auth-service joins `proxy` and the internal `auth-private` network. Auth PostgreSQL joins only `auth-private`, has a persistent named volume and publishes no host ports. Neither does auth-service. The shared gateway example routes `auth.k1n3ticnerdcore.tech` to auth-service:8080. Existing product routes are preserved.
 
-ORY Fosite is suitable as the OAuth/OIDC protocol engine. Its current composed handlers cover authorization code, PKCE, OIDC authorization-code behavior, refresh grants, and token revocation. Fosite validates protocol requests and produces protocol responses and errors. It deliberately does not provide production storage or an identity/login product.
+## Browser and identity endpoints
 
-Fosite owns:
+| Endpoint | Behavior |
+|---|---|
+| GET/POST `/register` | Trim/lowercase email; create unverified user and Argon2id credential atomically; persist verification challenge; attempt email |
+| GET/POST `/resend-verification` | Replace outstanding verification challenge for an eligible unverified account |
+| GET/POST `/forgot-password` | Generic result for existing/missing accounts and delivery failures |
+| GET/POST `/verify-email` | First-party fragment-consuming page and atomic one-time verification |
+| GET/POST `/reset-password` | First-party page; atomic password replacement, browser-session revocation and security event; post-commit notification |
+| GET/POST `/login` | Verify credential, require active/verified account, rotate presented browser session |
+| GET/POST `/logout`, `/revoke-all` | GET displays form; CSRF-protected POST revokes current/all auth browser sessions |
+| GET `/health/live`, `/health/ready` | Process liveness; database migration state and loaded signing-key readiness |
 
-- OAuth authorization and token request validation
-- exact registered redirect matching
-- authorization-code binding and one-time use
-- PKCE verification
-- scope and audience processing
-- refresh-token grant mechanics and rotation/revocation behavior
-- OAuth/OIDC protocol errors
-- ID/access/refresh token generation through configured strategies
-- RFC 7009 revocation request semantics
+All browser POSTs require an exact public Origin and a matching CSRF value from a secure, HttpOnly, host-only `__Host-auth_csrf` cookie and the submitted form. State changes never occur on logout GET. Forms use bounded request bodies; no request/body/access logger is installed.
 
-The auth application owns:
+`__Host-auth_session` has Secure, HttpOnly, Path=/, SameSite=Lax, no Domain, and a 12-hour absolute lifetime. It contains 256 random bits; PostgreSQL stores only its SHA-256 digest. Successful login replaces the presented session. Login checks credential version while holding the user lock, preventing a password reset racing with credential verification from minting a session from an obsolete password. Password rehashing upgrades older accepted Argon2id parameters on successful login. Invalid Argon2id parameters and oversized hashes/passwords are rejected before expensive allocation.
 
-- users, normalized email addresses, status, and verification state
-- Argon2id credentials and versioned hashing parameters
-- browser login sessions, CSRF, consent policy, and logout
-- recovery and verification challenges plus email delivery integration
-- registered clients and hashed confidential-client secrets
-- PostgreSQL implementations of Fosite storage interfaces
-- discovery, JWKS, userinfo HTTP presentation, key activation/rotation policy
-- rate limiting, security events, and audit retention
+Auth login handoffs store digests of a random browser-cookie value and the authorization request URI, with the original request time and five-minute expiry. Atomic consumption preserves `prompt=login`, `prompt=none` and `max_age` semantics across reauthentication. Only `/oauth2/auth` is an accepted local post-login destination.
 
-Fosite examples and memory storage are not production persistence and must not be copied as such.
+### Challenge storage and concurrency
 
-## V1 flows
+Verification/reset tokens contain 256 random bits encoded with base64url. Only SHA-256 token digests are stored. Links place tokens in `#token=...`, never query strings. The page's first inline nonce-authorized script reads the fragment, immediately calls `history.replaceState`, and places the token in a POST form. Pages load no external resources and use `default-src 'none'`, no-referrer, no-store and frame restrictions.
 
-- Authorization Code with mandatory PKCE (`S256`)
-- OpenID Connect scopes `openid`, `profile`, and `email`
-- confidential first-party BFF clients
-- refresh tokens and RFC 7009 revocation
-- no implicit flow, password grant, dynamic public registration, or wildcard redirect URI
+Every challenge writer/consumer first locks the parent user, then its challenge rows. A partial unique index enforces at most one unconsumed challenge per user/purpose. Concurrent resends supersede previous challenges. Consumption locks and checks purpose, expiration and consumed state. Verification and reset changes occur in the same transaction as consumption. Reset also revokes all auth browser sessions and records the security event; a failed transaction leaves the token usable and all previous state intact.
 
-Flowdraw is registered as a confidential client with one exact callback URI. Flowdraw's backend performs the code exchange and owns a host-only application session cookie. Access and refresh tokens never enter React local storage.
+Registration commits the account/credential before sending. If challenge creation or Resend fails, the account remains unverified and cannot sign in; requesting another verification message is the recovery path. A failed send never rolls back an already committed identity transition. Password-changed notification failure is reported internally and never undoes a successful reset.
 
-## Sessions and cookies
+### Enumeration, rate limits and availability
 
-The auth browser session is an opaque random value. PostgreSQL stores only its SHA-256 digest, user, creation/expiry timestamps, last-use time, and revocation state. The cookie is `__Host-auth_session`, `Secure`, `HttpOnly`, `Path=/`, and `SameSite=Lax`. Flowdraw later creates its own unrelated `__Host-` session cookie after the callback.
+Registration, verification resend and password recovery use identical generic public results across account existence and delivery outcomes. They have a six-second response floor and a 5.5-second work deadline; the Resend client is capped at five seconds. Missing-user login still computes a real Argon2id verification using a dummy hash.
 
-Session revocation and revoke-all are database updates. SSO is achieved by redirecting to auth; no wildcard-domain cookie is used.
+Each identity POST route has an independent PostgreSQL fixed-window limiter (10 attempts per 15 minutes per source and, when provided, account). Keys are HMAC-derived with the server secret before hashing for storage. Limits fail closed on database errors. Four concurrent identity operations bound password-hashing and inline-email work. Admission/rate-limit errors depend on load/attempts, not account existence. This is timing mitigation, not a claim of constant-time network behavior; tune limits and response budgets under real deployment load.
 
-## Passwords and challenges
+Caddy overwrites `X-Auth-Client-IP`; auth accepts it only as a valid IP. The example uses the actual peer address. Behind Cloudflare this may group users by Cloudflare edge. Before production, configure and validate trusted Cloudflare proxy ranges/client-IP handling at the shared gateway, then use its validated client IP. Never trust arbitrary inbound forwarding headers. The shared proxy network is a trust boundary.
 
-Passwords use `golang.org/x/crypto/argon2` Argon2id with a per-password random salt and a versioned encoded parameter string. Verification applies configured resource limits before allocating memory. Successful login rehashes when the stored parameters are older than current policy.
+## Resend integration
 
-Email verification and password recovery use 256-bit random, base64url one-time challenges. Only SHA-256 digests are stored. Creating a challenge invalidates older active challenges for the same user and purpose. Challenge consumption and its state transition are one PostgreSQL transaction: verification marks the email verified; reset changes the password, revokes every active browser session, and records a security event. Public forgot-password responses are identical for existing and absent users.
+Dependency direction remains auth domain -> `email.Sender` -> Resend adapter. Provider-independent escaped HTML/plaintext templates cover verification, recovery and security notifications. Standard `net/http` calls `https://api.resend.com/emails` with a bounded timeout, per-message idempotency key, no inline retry loop, and redirects disabled.
 
-The auth domain depends on `email.Sender`, not Resend. The V1 adapter sends both plain-text and escaped HTML content to Resend's HTTPS API with a five-second timeout and per-challenge idempotency key. Templates are kept in Go and cover address verification, password reset, and password/security notification. Raw challenge tokens appear only in the URL fragment (`#token=...`), which browsers do not send in HTTP requests. The first-party verification/reset page must read the fragment, immediately remove it with `history.replaceState`, load no third-party resources beforehand, and submit the token in a redacted request body. Request bodies and authorization headers must never be logged.
+Internal error categories distinguish timeouts, permanent 4xx/redirect failures, 429 rate limiting and transient 5xx/network failures. Provider-controlled response payloads never become error text. Logs contain only purpose/category, never API keys, Authorization headers, provider bodies, request bodies, raw tokens, callback URLs or session cookies. Automated tests use local HTTP fixtures or fake senders and never send email.
 
-### Email delivery failure semantics
+There is no durable email retry/outbox. Users must request a replacement message after delivery failure. API acceptance does not prove inbox delivery.
 
-- Configuration is rejected at startup when the provider, API key, sender address, or public URL is invalid/missing.
-- Network failure and timeout return a classified internal delivery failure; there is no inline retry.
-- Resend 4xx responses are permanent request/configuration failures and require operator correction.
-- Resend 429 responses are classified separately. The service does not sleep/retry in an interactive request; Resend publishes `Retry-After`, but durable deferred delivery needs a future queue/outbox decision.
-- Resend 5xx responses are transient provider failures, but are not blindly retried during the request.
-- Registration/resend can report delivery failure without changing PostgreSQL truth. Forgot-password always returns its generic public response and reports a sanitized operational error out-of-band.
+### DNS and delivery deployment
 
-Until an outbox/worker exists, a stored challenge whose send failed can be superseded safely by requesting another message. This is a known availability limitation, not a reason to add a queue in V1.
+Use a transactional subdomain, for example `auth.k1n3ticnerdcore.tech`, for reputation isolation. Add the domain in Resend. Copy **the exact SPF and DKIM records Resend provides** into Cloudflare; do not invent records or publish duplicate SPF policies. Add DMARC at the appropriate `_dmarc` name with `p=none` and a controlled reporting mailbox. Validate all legitimate senders before tightening to quarantine/reject. Readiness requires Resend's verified domain status and real received messages with SPF, DKIM and DMARC passing. No DNS or real sends are performed by repository tests.
 
-Email-generating endpoints require independent database/local limiter buckets for registration, verification resend, and password recovery, keyed by privacy-preserving hashes of normalized account and source identifiers. The HTTP endpoints are not implemented yet, so this enforcement remains a release blocker.
+## Fosite composition and endpoints
 
-### Resend sender-domain onboarding
+The pinned ORY Fosite provider composes:
 
-Prefer a transactional subdomain (for example `auth.k1n3ticnerdcore.tech`) to isolate sending reputation. Add that domain in Resend and copy the exact SPF and DKIM records Resend supplies into Cloudflare DNS; do not invent or duplicate SPF records. Publish DMARC at the appropriate `_dmarc` name, initially with monitoring policy (`p=none`) and a controlled aggregate-report mailbox, validate all legitimate senders, then move gradually to `quarantine` or `reject`. Sending is not operationally ready until Resend reports the domain verified and real delivery/header checks show SPF, DKIM, and DMARC passing.
+- `OAuth2AuthorizeExplicitFactory`
+- `OAuth2RefreshTokenGrantFactory`
+- `OpenIDConnectExplicitFactory`
+- `OpenIDConnectRefreshFactory`
+- `OAuth2TokenIntrospectionFactory` (internal userinfo validation)
+- `OAuth2TokenRevocationFactory`
+- `OAuth2PKCEFactory`
 
-Runtime configuration is `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_FROM_NAME`, and `AUTH_PUBLIC_URL`. Keep the API key in Docker secrets/environment management, never in the repository or image.
+Only authorization code, mandatory PKCE S256, OIDC and refresh grants are enabled. No implicit/password/client-credentials grant, dynamic client registration or wildcard redirects. Access tokens are opaque; ID tokens use RS256. Code lifetime is five minutes, access/ID tokens 15 minutes, refresh tokens 30 days. Refresh requires `offline_access`. Each refresh rotates its token, invalidates prior access tokens in the request family, and replay triggers family revocation through Fosite.
 
-## Tokens and keys
+| Endpoint | Protocol |
+|---|---|
+| GET `/oauth2/auth` | Authorization; verified browser login; preapproved registered first-party scopes |
+| POST `/oauth2/token` | Confidential client code exchange/refresh |
+| POST `/oauth2/revoke` | RFC 7009 revocation |
+| GET `/.well-known/openid-configuration` | Discovery |
+| GET `/.well-known/jwks.json` | Active and overlapping RSA public keys |
+| GET `/userinfo` | Fosite bearer-token validation and scope-filtered current account claims |
 
-OIDC signing uses asymmetric keys. Private keys remain in auth-service secret storage; public keys are returned by JWKS. Every key has a stable `kid`, algorithm, creation time, activation interval, and retirement interval. One key signs at a time; previous public keys remain published until every token they signed has expired plus clock skew.
+`openid`, `email`, `profile` and `offline_access` are accepted client scopes; profile currently adds no claims beyond the stable subject. Logout is the browser POST endpoint, not an advertised RP-initiated/front-channel/back-channel logout protocol.
 
-V1 supports file-mounted PEM keys and metadata configured through secrets. Rotation adds a new key, activates it, retains the previous verification key, then removes retired material only after the overlap window. A managed KMS/HSM can later replace the key loader without changing clients.
+Fosite implements OAuth/PKCE/JWT validation and token generation. PostgreSQL implements its transaction interface, atomic code invalidation and refresh rotation. OAuth lookup keys are SHA-256 digests, including the OIDC lookup that otherwise receives a raw code. Serialized request forms use a small allowlist, excluding client secrets, codes, refresh/access tokens and PKCE verifiers. Inactive records remain available for replay detection until expiry.
 
-## Database boundary
+Sources: [pinned Fosite transaction contract](https://github.com/ory/fosite/blob/v0.49.0/storage/transactional.go), [pinned refresh implementation](https://github.com/ory/fosite/blob/v0.49.0/handler/oauth2/flow_refresh.go).
 
-`auth_db` contains users, credentials, sessions, challenges, OAuth clients, Fosite request/token sessions, signing-key metadata, rate-limit buckets, and audit/security events. It contains no Flowdraw room, canvas, or permission records. `flowdraw_db` stores product authorization such as `usr_123` being an editor of a room.
+## Signing keys and rotation
 
-## Security-sensitive custom code
+Load one RSA PEM private key (PKCS#1 or PKCS#8, at least 2048 bits) using `AUTH_SIGNING_KEY_FILE`. `AUTH_SIGNING_KEY_ID` explicitly selects its stable `kid`; it is never generated on restart. The optional `AUTH_OVERLAP_JWKS_FILE` supplies previous RSA **public** keys. Empty/duplicate kids, private overlap keys and wrong algorithms are rejected. Only public material appears in JWKS. Activation is deployment-controlled; there is no automatic calendar/key-database scheduler.
 
-The following requires focused tests and review:
+Rotation procedure:
 
-1. Fosite PostgreSQL serialization and transactional one-time code consumption.
-2. Login-to-authorization handoff and CSRF/state preservation.
-3. Argon2id parsing, resource caps, comparison, and rehash policy.
-4. Recovery/verification challenge generation and consumption.
-5. Cookie and forwarded-origin handling behind trusted Caddy only.
-6. Signing-key selection, JWKS overlap, and rotation.
-7. Client-secret hashing and exact redirect registration.
+1. Generate a new private key outside the repository. Use a new stable kid; do not reuse a kid for a different key.
+2. Export the old public JWK into the overlap JWKS (retain `kid`, `alg=RS256`, `use=sig`). Keep existing still-needed overlap keys.
+3. Mount the new key and overlap file, change active kid, then replace the service. Ensure UID 10001 can read files; private keys should be owned accordingly and mode 0600.
+4. Verify discovery/JWKS and a fresh signed-token exchange. Retain old public keys for at least the 15-minute ID-token lifetime plus client cache/clock-skew allowance after the last old-key issue (use at least 30 minutes operationally).
+5. Remove retired public keys only after that window. Refresh grants issue fresh ID tokens with the current key.
 
-No OAuth grant, PKCE verifier, JWT signature, or protocol error logic is implemented independently when Fosite provides it.
+`AUTH_GLOBAL_SECRET` is a separate stable random HMAC secret for Fosite opaque tokens and rate-limit privacy. Changing it invalidates outstanding OAuth credentials; plan that as a forced reauthentication event. It is not an RSA signing key.
 
-## Operational model
+## Flowdraw integration and compatibility
 
-- `/health/live` checks only the Go process.
-- `/health/ready` checks `auth_db` and active signing-key availability.
-- Database migrations run as an explicit one-shot deployment command before the service update.
-- JSON structured logs exclude credentials, session values, codes, and tokens.
-- A local bounded login/registration/recovery limiter is acceptable for the initial single instance. Its interface can later use a distributed implementation without changing OAuth semantics.
-- Only Caddy publishes host ports. Neither auth-service nor auth-postgres publishes a host port.
+`auth register-client` provisions confidential client `flowdraw`, bcrypt-hashing its client secret, with exactly one HTTPS `/api/auth/callback` URI. The operator supplies the actual hostname; the example hostname must be replaced identically on both sides.
 
-## Deliberately excluded from V1
+The Node backend uses `openid-client` for discovery, S256, code exchange, state/nonce checks and ID-token validation, including signature verification via `enableNonRepudiationChecks`. Five-minute browser-bound login handoffs are AES-256-GCM encrypted in `flowdraw_db`. The callback consumes them atomically. Tokens are used only in the backend during exchange and discarded; the product does not request offline access.
 
-Redis, queues, Kafka, Kubernetes, SAML, SCIM, social providers, passkeys, MFA, public dynamic client registration, impersonation, and centralized product authorization.
+The backend creates its own 12-hour `__Host-flowdraw_session` with a SHA-256 secret digest in its own database. `/api/auth/session` returns minimal user data and a session-derived CSRF value. `/api/auth/logout` requires exact Origin and `X-CSRF-Token`. React stores only this non-token session view in component memory and displays sign-in/sign-out controls. No access/refresh tokens enter React, localStorage or sessionStorage.
 
-## Production-readiness status
+OIDC integration is opt-in via `FLOWDRAW_AUTH_ISSUER`; without it, the existing application continues and auth routes report unavailable. Existing capability-based room authorization remains unchanged. Auth login does **not** convert existing rooms into account-owned resources. Auth password reset/revoke-all and Flowdraw logout operate on their respective browser sessions; existing product sessions and independently issued OAuth credentials are not globally synchronized. Back-channel logout and account-based room authorization are outside this change.
 
-This auth service is **not production-ready**. Password hashing, the Fosite PostgreSQL storage foundation, the Resend boundary, and transactional challenge storage exist. Still required are the runnable server and migrations command, registration/login/reset/verification HTTP handlers and safe fragment-consuming pages, endpoint rate limiting, browser sessions and CSRF, complete Fosite provider composition, authorization/token/revocation endpoints, discovery, JWKS, userinfo, signing-key loading and rotation, Flowdraw client/session integration, Docker/Caddy definitions, and end-to-end OIDC/security tests.
+Migration 002 deletes foundation OAuth sessions because their lookup format/serialized payloads changed; it also consumes duplicate active challenges before adding the unique index. Existing foundation OAuth clients must be provisioned with the explicit command and exact deployed callback. The internal reset storage interface now returns the committed recipient for its security notification.
+
+## Configuration and deployment
+
+See `auth-service/.env.example`, `deploy/auth.env.example` and `deploy/.env.example`. No real secrets are committed.
+
+Auth runtime: `AUTH_DATABASE_URL`, `AUTH_ISSUER`, `AUTH_PUBLIC_URL` (identical absolute HTTPS origins), `AUTH_ADDRESS`, `AUTH_COOKIE_SECURE=true`, `AUTH_GLOBAL_SECRET` (base64, at least 32 random bytes), `AUTH_SIGNING_KEY_FILE`, `AUTH_SIGNING_KEY_ID`, optional `AUTH_OVERLAP_JWKS_FILE`, `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, bare `EMAIL_FROM`, optional `EMAIL_FROM_NAME`.
+
+Provisioning: `FLOWDRAW_CALLBACK_URL`, `FLOWDRAW_CLIENT_SECRET` (32–72 bytes); Compose additionally uses `GHCR_OWNER`, `AUTH_IMAGE_TAG`, `AUTH_POSTGRES_PASSWORD`, `AUTH_KEYS_DIRECTORY`. URL-encode reserved password characters in database URLs. Private-network PostgreSQL uses its own credentials; external database deployments require appropriate TLS.
+
+Flowdraw backend: `FLOWDRAW_AUTH_ISSUER`, `FLOWDRAW_PUBLIC_URL`, matching `FLOWDRAW_CLIENT_SECRET`, `FLOWDRAW_SESSION_KEY` (base64, exactly 32 random bytes). No secret belongs in `VITE_*` variables.
+
+Run locally with Go 1.25+ and environment loaded:
+
+```sh
+cd auth-service
+go run ./cmd/auth migrate
+go run ./cmd/auth register-client
+go run ./cmd/auth serve
+```
+
+Migrations are explicit, embedded, transactionally recorded and serialized with a PostgreSQL advisory lock. Serving does not migrate. Liveness and readiness are distinct; readiness requires the latest schema and loaded active key. The server uses bounded HTTP/database timeouts and graceful shutdown.
+
+On the deployment host, after provisioning `auth.env`, key mounts and the shared proxy network:
+
+```sh
+docker compose --env-file auth.env -f auth.compose.yml pull
+docker compose --env-file auth.env -f auth.compose.yml up -d auth-postgres
+docker compose --env-file auth.env -f auth.compose.yml run --rm auth-service migrate
+docker compose --env-file auth.env -f auth.compose.yml run --rm auth-service register-client
+docker compose --env-file auth.env -f auth.compose.yml up -d auth-service
+```
+
+Merge the auth virtual host into the **existing shared gateway** Caddyfile and validate/reload it. Configure Flowdraw's four auth variables and replace its API/frontend images. CI tests auth against disposable PostgreSQL and builds an auth image; auth migrations and first deployment remain explicit operations.
+
+Before rollout, establish backup/restore, retention cleanup for expired challenges/sessions/handoffs/rate buckets, monitoring for sanitized email failures/readiness, and load testing for rate/admission limits. Do not enable access logging on callback/auth URLs or configure infrastructure to log request bodies/Authorization headers.
