@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -479,6 +480,41 @@ func TestResetRollbackAndExpiry(t *testing.T) {
 		t.Fatal("expired session accepted")
 	}
 }
+
+func TestExpiredAuthorizationCodeAndRecoveryChallenges(t *testing.T) {
+	s, sender := setup(t)
+	clientSession, address := registerLogin(t, s, sender)
+	ctx := context.Background()
+
+	code := authorizeCode(t, s, clientSession)
+	if _, err := s.DB.Exec(ctx, `UPDATE oauth_sessions SET expires_at=now()-interval '1 second' WHERE kind='authorize_code'`); err != nil {
+		t.Fatal(err)
+	}
+	if response := tokenRequest(t, s, exchangeValues(code)); response.Code == http.StatusOK {
+		t.Fatal("expired authorization code accepted")
+	}
+
+	_ = post(t, s.Handler(), "/forgot-password", url.Values{"email": {address}})
+	resetToken := fragmentToken(t, sender.reset)
+	if _, err := s.DB.Exec(ctx, `UPDATE identity_challenges SET expires_at=now()-interval '1 second' WHERE purpose='reset_password' AND consumed_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	response := post(t, s.Handler(), "/reset-password", url.Values{
+		"token":    {resetToken},
+		"password": {"replacement password long enough"},
+	})
+	if response.Code == http.StatusOK {
+		t.Fatal("expired recovery challenge accepted")
+	}
+
+	response = post(t, s.Handler(), "/reset-password", url.Values{
+		"token":    {strings.Repeat("x", 43)},
+		"password": {"replacement password long enough"},
+	})
+	if response.Code == http.StatusOK {
+		t.Fatal("invalid recovery challenge accepted")
+	}
+}
 func TestIndependentRateLimits(t *testing.T) {
 	s, _ := setup(t)
 	ctx := context.Background()
@@ -523,6 +559,50 @@ func TestFlowdrawBFFEndToEnd(t *testing.T) {
 	cmd.Env = append(os.Environ(), "AUTH_TEST_ISSUER="+ts.URL, "AUTH_TEST_COOKIE="+c.Name+"="+c.Value, "NODE_EXTRA_CA_CERTS="+certPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("BFF integration failed: %v\n%s", err, out)
+	}
+}
+
+func TestSigningKeyPersistsAcrossProviderRestart(t *testing.T) {
+	s, sender := setup(t)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "active.pem")
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	if err = os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	firstKeys, err := LoadKeys(keyPath, "persistent-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Keys = firstKeys
+	s.OAuth = Provider(&storage.OAuthStore{DB: s.DB}, s.Config.Issuer, s.Secret, firstKeys)
+	clientSession, _ := registerLogin(t, s, sender)
+	issued := tokens(t, tokenRequest(t, s, exchangeValues(authorizeCode(t, s, clientSession))))
+	idToken := issued["id_token"].(string)
+
+	// Recreate the key loader and provider from the same mounted private-key file,
+	// matching a normal container restart with the persistent mount unchanged.
+	restartedKeys, err := LoadKeys(keyPath, "persistent-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(s.Config, s.DB, sender, restartedKeys, s.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := jose.ParseSigned(idToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = parsed.Verify(restarted.Keys.Public.Keys[0].Key); err != nil {
+		t.Fatal("pre-restart token failed verification after restart", err)
+	}
+	if parsed.Signatures[0].Header.KeyID != "persistent-key" {
+		t.Fatal("signing kid changed across restart")
 	}
 }
 

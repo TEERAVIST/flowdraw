@@ -18,6 +18,9 @@ func Provider(store *storage.OAuthStore, issuer string, secret []byte, keys Keys
 		RefreshTokenScopes: []string{"offline_access"}, ScopeStrategy: fosite.ExactScopeStrategy,
 		SendDebugMessagesToClients: false,
 	}
+	// Fosite otherwise installs this default lazily in GetSecretsHasher.
+	// Initialize it before concurrent HTTP requests share the provider.
+	config.ClientSecretsHasher = &fosite.BCrypt{Config: config}
 	getter := func(context.Context) (interface{}, error) { return &keys.Active, nil }
 	return compose.Compose(config, store, &compose.CommonStrategy{
 		CoreStrategy:               compose.NewOAuth2HMACStrategy(config),

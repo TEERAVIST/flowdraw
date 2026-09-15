@@ -31,7 +31,10 @@ try {
   const completed = await request('GET', callback.pathname + callback.search, { cookie: flowCookie });
   assert.equal(completed.status, 303, completed.body);
   assert.equal(completed.headers.Location, '/');
-  const sessionCookie = completed.headers['Set-Cookie'].find(v => v.startsWith('__Host-flowdraw_session=')).split(';')[0];
+  const sessionSetCookie = completed.headers['Set-Cookie'].find(v => v.startsWith('__Host-flowdraw_session='));
+  assert.match(sessionSetCookie, /; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=43200$/);
+  assert.equal(sessionSetCookie.includes('Domain='), false);
+  const sessionCookie = sessionSetCookie.split(';')[0];
   const session = await request('GET', '/api/auth/session', { cookie: sessionCookie });
   const data = JSON.parse(session.body);
   assert.equal(data.user.email, 'u@example.test');
